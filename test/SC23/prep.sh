@@ -6,8 +6,8 @@ TOPDIR=$(cd $WKDIR/../.. ; pwd)
 GROUP="rccs-sdt" # your group
 
 MEMBER=2 ### up to 50
-PRC_NUM_X=10
-PRC_NUM_Y=10
+PRC_NUM_X=4
+PRC_NUM_Y=5
 
 IMAXG=1280
 JMAXG=1280
@@ -130,3 +130,9 @@ if [ $RUN_PP == 1 ] ;then
   sed -i -e "s/<--NPROCS_PP-->/$NPROCS_PER_MEM/g" exec.sh
 fi
  
+sed -i -e "s/###pp###//g" exec.sh
+sed -i -e "s/<--NPROCS_PP-->/$NPROCS_PER_MEM/g" exec.sh
+
+# Modify generated file
+sed -i 's/-std-proc \([^ ]*\)/--output-filename \1 --tag-output/g' exec.sh
+sed -i '/^[[:space:]]*#\?export[[:space:]]\+LD_LIBRARY_PATH=/d' exec.sh
