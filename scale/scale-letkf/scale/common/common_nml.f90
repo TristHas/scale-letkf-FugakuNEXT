@@ -103,6 +103,8 @@ MODULE common_nml
   character(filelenmax) :: GUES_MDET_IN_BASENAME = ''
   logical               :: GUES_SPRD_OUT = .true.
   character(filelenmax) :: GUES_SPRD_OUT_BASENAME = ''
+  logical               :: LETKF_INPUT_DUMP = .false.
+  character(filelenmax) :: LETKF_INPUT_DUMP_DIR = 'letkf_dump'
   character(filelenmax) :: ANAL_OUT_BASENAME = 'anal.@@@@'
   character(filelenmax) :: ANAL_MEAN_OUT_BASENAME = ''
   character(filelenmax) :: ANAL_MDET_OUT_BASENAME = ''
@@ -591,6 +593,8 @@ subroutine read_nml_letkf
     GUES_MDET_IN_BASENAME, &
     GUES_SPRD_OUT, &
     GUES_SPRD_OUT_BASENAME, &
+    LETKF_INPUT_DUMP, &
+    LETKF_INPUT_DUMP_DIR, &
     ANAL_OUT_BASENAME, &
     ANAL_MEAN_OUT_BASENAME, &
     ANAL_MDET_OUT_BASENAME, &

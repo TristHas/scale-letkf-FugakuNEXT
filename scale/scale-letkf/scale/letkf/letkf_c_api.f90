@@ -10,6 +10,7 @@ module letkf_c_api
   use common_mtx, only: mtx_setup
   use letkf_obs
   use letkf_tools
+  use letkf_dump
   use obsope_tools, only: obsope_cal
   implicit none
   private
@@ -48,6 +49,8 @@ module letkf_c_api
   public :: c_obsope_cal
   public :: c_set_nobs_extern
   public :: c_set_letkf_obs
+  public :: c_dump_letkf_obs_state
+  public :: c_dump_letkf_gues_state
   public :: c_set_common_mpi_grid
   public :: c_allocate_state_arrays
   public :: c_read_ens_mpi
@@ -56,6 +59,7 @@ module letkf_c_api
   public :: c_write_anal_sprd
   public :: c_das_letkf
   public :: c_adjust_det_run
+  public :: c_dump_letkf_analysis_state
   public :: c_ensmean_grd
   public :: c_write_ens_mpi
   public :: c_get_state_dims
@@ -538,7 +542,24 @@ contains
     ierr = 0
   end subroutine c_set_letkf_obs
 
+  subroutine c_dump_letkf_obs_state(ierr) bind(C, name="letkf_dump_letkf_obs_state")
+    integer(c_int), intent(out) :: ierr
 
+    call dump_letkf_obs_state
+    ierr = 0
+  end subroutine c_dump_letkf_obs_state
+
+  subroutine c_dump_letkf_gues_state(ierr) bind(C, name="letkf_dump_letkf_gues_state")
+    integer(c_int), intent(out) :: ierr
+
+    if (.not. state_cache_ready) then
+      ierr = -1
+      return
+    end if
+
+    call dump_letkf_gues_state(gues3d_cache, gues2d_cache)
+    ierr = 0
+  end subroutine c_dump_letkf_gues_state
 
   subroutine c_set_common_mpi_grid(ierr) bind(C, name="letkf_set_common_mpi_grid")
     integer(c_int), intent(out) :: ierr
@@ -669,6 +690,17 @@ contains
     ierr = 0
   end subroutine c_adjust_det_run
 
+  subroutine c_dump_letkf_analysis_state(ierr) bind(C, name="letkf_dump_letkf_analysis_state")
+    integer(c_int), intent(out) :: ierr
+
+    if (.not. state_cache_ready) then
+      ierr = -1
+      return
+    end if
+
+    call dump_letkf_analysis_state(anal3d_cache, anal2d_cache)
+    ierr = 0
+  end subroutine c_dump_letkf_analysis_state
 
   subroutine c_ensmean_grd(member, nens_local, nij1_local, ierr) bind(C, name="letkf_ensmean_grd")
     integer(c_int), value :: member
