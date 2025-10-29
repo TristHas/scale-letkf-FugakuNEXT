@@ -94,15 +94,29 @@ subroutine initialize_mpi_scale
   use scale_prc, only: &
      PRC_MPIstart, &
      PRC_UNIVERSAL_setup, &
-     PRC_UNIVERSAL_myrank
+     PRC_UNIVERSAL_myrank, &
+     PRC_mpi_alive, &
+     PRC_ABORT_COMM_WORLD
+  use mpi, only: MPI_Initialized, MPI_COMM_WORLD
   implicit none
   integer :: universal_comm   ! dummy
   integer :: universal_nprocs ! dummy
   integer :: universal_myrank ! dummy
   logical :: universal_master ! dummy
 !  integer :: ierr
+  logical :: already_initialized
+  integer :: ierr_mpi
 
-  call PRC_MPIstart( universal_comm ) ! [OUT]
+  call MPI_Initialized(already_initialized, ierr_mpi)
+  if (ierr_mpi /= 0) already_initialized = .false.
+
+  if (.not. already_initialized) then
+    call PRC_MPIstart( universal_comm ) ! [OUT]
+  else
+    universal_comm = MPI_COMM_WORLD
+    PRC_mpi_alive = .true.
+    PRC_ABORT_COMM_WORLD = MPI_COMM_WORLD
+  end if
 
 !  call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
 !  call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
@@ -130,11 +144,17 @@ end subroutine initialize_mpi_scale
 !-------------------------------------------------------------------------------
 subroutine finalize_mpi_scale
 !  use scale_prc, only: PRC_MPIfinish
+  use mpi, only: MPI_Finalized, MPI_Finalize
   implicit none
   integer :: ierr
+  logical :: already_finalized
 
 !  call PRC_MPIfinish
-  call MPI_Finalize(ierr)
+  call MPI_Finalized(already_finalized, ierr)
+  if (ierr /= 0) already_finalized = .false.
+  if (.not. already_finalized) then
+    call MPI_Finalize(ierr)
+  end if
 
   return
 end subroutine finalize_mpi_scale

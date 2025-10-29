@@ -16,7 +16,7 @@ MODULE common_scale
   use common_nml
 
   use scale_precision, only: RP, SP
-  use scale_io, only: H_MID
+  use scale_io, only: H_MID, H_LONG
   use scale_prof
 
   IMPLICIT NONE
@@ -53,6 +53,8 @@ MODULE common_scale
      (/'DENS      ', 'MOMX      ', 'MOMY      ', 'MOMZ      ', 'RHOT      ', &
        'QV        ', 'QC        ', 'QR        ', 'QI        ', 'QS        ', 'QG        '/)
   CHARACTER(vname_max) :: v2d_name(nv2d)
+
+  character(len=H_LONG), save :: external_conf_path = ""
 
   ! 
   !--- 3D, 2D diagnostic variables (in SCALE history files)
@@ -146,6 +148,15 @@ MODULE common_scale
 CONTAINS
 
 !-------------------------------------------------------------------------------
+! Allow overriding the configuration path from external callers
+!-------------------------------------------------------------------------------
+subroutine set_common_conf_path(path)
+  character(len=*), intent(in) :: path
+
+  external_conf_path = trim(path)
+end subroutine set_common_conf_path
+
+!-------------------------------------------------------------------------------
 ! Initialize standard I/O and read common namelist of SCALE-LETKF
 !-------------------------------------------------------------------------------
 subroutine set_common_conf( myrank )
@@ -157,7 +168,11 @@ subroutine set_common_conf( myrank )
   integer, intent(in) :: myrank 
 
   ! setup standard I/O
-  call IO_setup( modelname)
+  if (external_conf_path /= "") then
+    call IO_setup( modelname, conf_name=external_conf_path )
+  else
+    call IO_setup( modelname)
+  end if
 
   call read_nml_log
   call set_log_out( myrank )

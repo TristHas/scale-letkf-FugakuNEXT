@@ -2,6 +2,9 @@ include ../configure
 
 PROGS   = letkf efso
 
+API_TARGET = libletkf_api.so
+API_OBJS   = letkf_c_api.o
+
 OBJS    = letkf_obs.o efso_tools.o letkf_tools.o
 
 COMMON_DIR = ../common
@@ -30,7 +33,7 @@ LIBS    = $(SCALE_LIB) $(NETCDF_LIB) $(LAPACK_LIB) $(KEVD_LIB)
 
 .PHONY:	all clean FORCE
 
-all:	$(PROGS)
+all:	$(PROGS) $(API_TARGET)
 
 letkf:	letkf.o $(COMMON_DIR) $(OBS_DIR)
 	$(FC) $(FOPTS) $(FMCMODEL) -o letkf letkf.o \
@@ -43,6 +46,13 @@ letkf_obs.o:	letkf_obs.f90 $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
 letkf_tools.o:	letkf_tools.f90 letkf_obs.o efso_tools.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
+
+letkf_c_api.o:	letkf_c_api.f90 letkf_obs.o letkf_tools.o $(COMMON_DIR) $(OBS_DIR)
+	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) -I$(OBS_DIR) $(INCS)
+
+$(API_TARGET):	$(API_OBJS) $(COMMON_DIR) $(OBS_DIR)
+	$(FC) $(FOPTS) $(FMCMODEL) -shared -o $@ $(API_OBJS) \
+		$(COMMON_OBJS) $(OBS_OBJS) $(OBJS) $(SCALE_RM_OBJS) $(LIBS)
 
 $(OBS_DIR):	FORCE
 	$(MAKE) -C $@ obsope_tools.o
@@ -58,6 +68,6 @@ efso_tools.o:	efso_tools.f90 letkf_obs.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
 
 clean:
-	rm -f *.o *.mod *.lst $(PROGS)
+	rm -f *.o *.mod *.lst $(PROGS) $(API_TARGET)
 
 FORCE:
