@@ -173,6 +173,12 @@ class LetkfAPI:
     def set_letkf_obs(self) -> None:
         self._invoke(self.lib.letkf_set_letkf_obs, name="letkf_set_letkf_obs")
 
+    def dump_letkf_obs_state(self) -> None:
+        self._invoke(self.lib.letkf_dump_letkf_obs_state, name="letkf_dump_letkf_obs_state")
+
+    def dump_letkf_gues_state(self) -> None:
+        self._invoke(self.lib.letkf_dump_letkf_gues_state, name="letkf_dump_letkf_gues_state")
+
     def set_common_mpi_grid(self) -> None:
         self._invoke(self.lib.letkf_set_common_mpi_grid, name="letkf_set_common_mpi_grid")
 
@@ -193,6 +199,9 @@ class LetkfAPI:
 
     def das_letkf(self) -> None:
         self._invoke(self.lib.letkf_das_letkf, name="letkf_das_letkf")
+
+    def dump_letkf_analysis_state(self) -> None:
+        self._invoke(self.lib.letkf_dump_letkf_analysis_state, name="letkf_dump_letkf_analysis_state")
 
     def ensmean_grd(self, member: int, nens: int, nij1: int) -> None:
         self._invoke(
@@ -367,10 +376,12 @@ class LetkfAPI:
                 self.set_nobs_extern(0)
             self.obsope_cal()
             self.set_letkf_obs()
+            self.dump_letkf_obs_state()
             self.set_common_mpi_grid()
             self.allocate_state_arrays()
             self.read_ens_mpi()
             self.adjust_det_run()
+            self.dump_letkf_gues_state()
             if info.departure_stat and info.log_level >= 1:
                 self.write_ensmean(calced=False, monit_step=1)
             else:
@@ -378,6 +389,7 @@ class LetkfAPI:
             if info.gues_sprd_out:
                 self.write_gues_sprd()
             self.das_letkf()
+            self.dump_letkf_analysis_state()
             dims = self.get_state_dims()
             self.ensmean_grd(info.member, dims["nens"], dims["nij1"])
             if info.anal_sprd_out:
@@ -423,6 +435,8 @@ class LetkfAPI:
         self.lib.letkf_set_nobs_extern.argtypes = [c_int, ci_p]
         self.lib.letkf_obsope_cal.argtypes = [ci_p]
         self.lib.letkf_set_letkf_obs.argtypes = [ci_p]
+        self.lib.letkf_dump_letkf_obs_state.argtypes = [ci_p]
+        self.lib.letkf_dump_letkf_gues_state.argtypes = [ci_p]
         self.lib.letkf_set_common_mpi_grid.argtypes = [ci_p]
         self.lib.letkf_allocate_state_arrays.argtypes = [ci_p]
         self.lib.letkf_read_ens_mpi.argtypes = [ci_p]
@@ -430,6 +444,7 @@ class LetkfAPI:
         self.lib.letkf_write_enssprd.argtypes = [ci_p]
         self.lib.letkf_write_anal_sprd.argtypes = [ci_p]
         self.lib.letkf_das_letkf.argtypes = [ci_p]
+        self.lib.letkf_dump_letkf_analysis_state.argtypes = [ci_p]
         self.lib.letkf_ensmean_grd.argtypes = [c_int, c_int, c_int, ci_p]
         self.lib.letkf_write_ens_mpi.argtypes = [c_int, ci_p]
         self.lib.letkf_write_ensmean.argtypes = [c_int, c_int, ci_p]
