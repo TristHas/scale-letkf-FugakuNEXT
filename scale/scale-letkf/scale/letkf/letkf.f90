@@ -20,6 +20,7 @@ PROGRAM letkf
     mtx_setup
   USE letkf_obs
   USE letkf_tools
+  use letkf_dump
   use obsope_tools, only: &
     obsope_cal
   IMPLICIT NONE
@@ -119,6 +120,7 @@ PROGRAM letkf
 !-----------------------------------------------------------------------
 
     call set_letkf_obs
+    call dump_letkf_obs_state
 
     call mpi_timer('PROCESS_OBS', 1, barrier=MPI_COMM_a)
 
@@ -149,6 +151,7 @@ PROGRAM letkf
     end if
 
     call mpi_timer('READ_GUES', 1, barrier=MPI_COMM_a)
+    call dump_letkf_gues_state(gues3d, gues2d)
 
     !
     ! WRITE ENS MEAN and SPRD
@@ -175,6 +178,7 @@ PROGRAM letkf
     call das_letkf(gues3d,gues2d,anal3d,anal2d)
 
     call mpi_timer('DAS_LETKF', 1, barrier=MPI_COMM_a)
+    call dump_letkf_analysis_state(anal3d, anal2d)
 
 !-----------------------------------------------------------------------
 ! Analysis ensemble
