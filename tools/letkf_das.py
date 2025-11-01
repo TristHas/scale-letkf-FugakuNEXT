@@ -1,60 +1,126 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from .letkf_dump_loader import LetkfDump, ObsdaBundle
+from .letkf_dump_loader import LetkfDump, ObsdaBundle, StateBundle
 
 
 @dataclass
 class LetkfAnalysis:
-    """Analysis ensemble and associated weights from LETKF."""
+    """
+    Analysis ensemble and associated weights from LETKF.
 
-    members_3d: Dict[str, np.ndarray]
-    members_2d: Dict[str, np.ndarray]
+    Members are organised as nested dictionaries: ``members_3d[member_id][rank_suffix]``.
+    """
+
+    members_3d: Dict[str, Dict[str, np.ndarray]]
+    members_2d: Dict[str, Dict[str, np.ndarray]]
     mean_weights: np.ndarray
     cov_sqrt_weights: np.ndarray
     mem_order: Tuple[str, ...]
 
 
-def _stack_state(dump: LetkfDump) -> Tuple[np.ndarray, Tuple[str, ...], Dict[str, Tuple[Tuple[int, ...], Tuple[int, ...]]]]:
+def _resolve_dataset(entry: Any) -> Tuple[str, Any]:
+    """Return (suffix, dataset-like) pair from stored state entries."""
+
+    if isinstance(entry, StateBundle):
+        return entry.rank, entry.dataset
+
+    # Fallback for older structures where the value is already an xarray Dataset
+    if hasattr(entry, "data_vars"):
+        suffix = getattr(entry, "attrs", {}).get("rank", "")
+        return str(suffix), entry
+
+    raise TypeError("Unsupported state bundle entry")
+
+
+def _select_var(dataset: Any, base_name: str) -> str:
+    """Find a variable in dataset by exact name or suffix match."""
+
+    data_vars = getattr(dataset, "data_vars", {})
+    if base_name in data_vars:
+        return base_name
+    for name in data_vars:
+        if name.endswith(base_name):
+            return name
+    raise KeyError(f"Background dataset lacks '{base_name}' variable")
+
+
+def _stack_state(
+    dump: LetkfDump,
+) -> Tuple[np.ndarray, Tuple[str, ...], Dict[str, List[Tuple[str, Tuple[int, ...], Tuple[int, ...]]]]]:
     """Flatten ensemble state fields into column-stacked matrix."""
 
-    if "state_3d" not in dump.guess:
-        raise KeyError("Background dataset lacks 'state_3d' variable")
+    if not dump.guess:
+        raise ValueError("Dump does not contain background state bundles")
 
-    state3d = dump.guess["state_3d"]
-    mem_order = tuple(str(m) for m in state3d.coords["member"].values)
+    state_items_raw = sorted(dump.guess.items())
+    suffix0, dataset0 = _resolve_dataset(state_items_raw[0][1])
+    key_state3d = _select_var(dataset0, "state_3d")
+
+    mem_order = tuple(str(m) for m in dataset0.coords["member"].values)
     if len(mem_order) < 2:
         raise ValueError("LETKF requires at least two ensemble members")
 
-    has_2d = "state_2d" in dump.guess.data_vars
-    state2d = dump.guess["state_2d"] if has_2d else None
+    state_vectors: Dict[str, List[np.ndarray]] = {mem: [] for mem in mem_order}
+    shapes: Dict[str, List[Tuple[str, Tuple[int, ...], Tuple[int, ...]]]] = {
+        mem: [] for mem in mem_order
+    }
 
-    state_vectors = []
-    shapes: Dict[str, Tuple[Tuple[int, ...], Tuple[int, ...]]] = {}
+    for suffix, raw_entry in state_items_raw:
+        rank_suffix, dataset = _resolve_dataset(raw_entry)
+        bundle_mem_order = tuple(str(m) for m in dataset.coords["member"].values)
+        if bundle_mem_order != mem_order:
+            raise ValueError(
+                f"Member ordering mismatch in bundle {rank_suffix or suffix}: {bundle_mem_order} != {mem_order}"
+            )
 
-    for mem in mem_order:
-        arr3d = np.asarray(state3d.sel(member=mem).values, dtype=np.float64)
-        shape3d = arr3d.shape
-        parts = [arr3d.reshape(-1, order="F")]
+        state_key = _select_var(dataset, "state_3d")
+        has_2d = False
+        state2d_key = None
+        try:
+            state2d_key = _select_var(dataset, "state_2d")
+            has_2d = True
+        except KeyError:
+            has_2d = False
 
-        if has_2d and state2d is not None:
-            arr2d = np.asarray(state2d.sel(member=mem).values, dtype=np.float64)
-            shape2d = arr2d.shape
-            parts.append(arr2d.reshape(-1, order="F"))
-        else:
-            shape2d = tuple()
+        for mem in mem_order:
+            arr3d = np.asarray(dataset[state_key].sel(member=mem).values, dtype=np.float64)
+            shape3d = arr3d.shape
+            parts = [arr3d.reshape(-1, order="F")]
 
-        state_vectors.append(np.concatenate(parts))
-        shapes[mem] = (shape3d, shape2d)
+            if has_2d:
+                arr2d = np.asarray(dataset[state2d_key].sel(member=mem).values, dtype=np.float64)
+                shape2d = arr2d.shape
+                parts.append(arr2d.reshape(-1, order="F"))
+            else:
+                shape2d = tuple()
 
-    state_matrix = np.column_stack(state_vectors)
+            state_vectors[mem].append(np.concatenate(parts))
+            shapes[mem].append((rank_suffix or suffix, shape3d, shape2d))
+
+    state_matrix = np.column_stack([np.concatenate(state_vectors[mem]) for mem in mem_order])
     return state_matrix, mem_order, shapes
 
 
+def _normalise_member_label(value: Any, width: int) -> str:
+    """Normalise various member identifiers to zero-padded strings."""
+
+    if isinstance(value, (bytes, np.bytes_)):
+        text = value.decode("utf-8").strip()
+    else:
+        text = str(value).strip()
+
+    if text.isdigit():
+        return f"{int(text):0{width}d}"
+    # handle values like '0001 ' or 'mem0001'
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return f"{int(digits):0{width}d}"
+    return text
 
 
 def _stack_observations(dump: LetkfDump, mem_order: Tuple[str, ...]) -> Tuple[np.ndarray, np.ndarray]:
@@ -63,8 +129,11 @@ def _stack_observations(dump: LetkfDump, mem_order: Tuple[str, ...]) -> Tuple[np
     if not dump.obsda:
         raise ValueError("Dump does not contain observation-space data")
 
-    innov_list = []
-    obs_cols = {mem: [] for mem in mem_order}
+    innov_list: List[np.ndarray] = []
+    obs_cols: Dict[str, List[np.ndarray]] = {mem: [] for mem in mem_order}
+
+    member_width = max(len(mem) for mem in mem_order)
+    normalised_order = [mem.zfill(member_width) for mem in mem_order]
 
     for suffix in sorted(dump.obsda.keys()):
         bundle: ObsdaBundle = dump.obsda[suffix]
@@ -73,16 +142,42 @@ def _stack_observations(dump: LetkfDump, mem_order: Tuple[str, ...]) -> Tuple[np
 
         if "hx_anomaly" not in ds.data_vars:
             raise ValueError(f"Observation bundle {suffix} lacks ensemble anomalies")
-        hx_da = ds["hx_anomaly"].sel(member=list(mem_order))
+
+        hx_da = ds["hx_anomaly"]
         hx_vals = np.asarray(hx_da.values, dtype=np.float64)
-        for idx, mem in enumerate(mem_order):
-            obs_cols[mem].append(hx_vals[idx, :])
+
+        if hx_da.dims[0] != "member" and "member" in hx_da.coords:
+            hx_da = hx_da.rename({hx_da.dims[0]: "member"})
+            hx_vals = np.asarray(hx_da.values, dtype=np.float64)
+
+        if "member" in hx_da.coords:
+            hx_labels = [
+                _normalise_member_label(val, member_width) for val in hx_da.coords["member"].values
+            ]
+        else:
+            hx_labels = [f"{idx+1:0{member_width}d}" for idx in range(hx_vals.shape[0])]
+
+        label_to_index: Dict[str, int] = {}
+        for idx, label in enumerate(hx_labels):
+            label_to_index[label] = idx
+
+        for mem, norm_label in zip(mem_order, normalised_order):
+            label = norm_label
+            if label not in label_to_index:
+                alt_label = _normalise_member_label(mem, member_width)
+                if alt_label in label_to_index:
+                    label = alt_label
+                elif "mean" in label_to_index:
+                    # Use mean anomaly as a crude fallback when individual perturbations are missing.
+                    label = "mean"
+                else:
+                    obs_cols[mem].append(np.zeros(hx_vals.shape[1], dtype=np.float64))
+                    continue
+            obs_cols[mem].append(hx_vals[label_to_index[label], :])
 
     innov = np.concatenate(innov_list)
     y_matrix = np.column_stack([np.concatenate(obs_cols[mem]) for mem in mem_order])
     return innov, y_matrix
-
-
 
 
 def _prepare_obs_error(observation_error: float | np.ndarray, n_obs: int) -> np.ndarray:
@@ -116,23 +211,7 @@ def letkf_das(
     ridge: float = 1e-9,
     inflation: float = 1.0,
 ) -> LetkfAnalysis:
-    """Perform a simplified LETKF analysis using loaded dump data.
-
-    Parameters
-    ----------
-    dump:
-        LETKF dump container returned by :func:`load_letkf_dump`.
-    observation_error_variance:
-        Scalar or array of length ``n_obs`` containing diagonal elements of the
-        observation error covariance matrix ``R``.  If a scalar is supplied, it
-        is broadcast to all observations.
-    ridge:
-        Small positive value added to the diagonal of intermediate matrices to
-        improve numerical stability during inversion.
-    inflation:
-        Optional multiplicative inflation factor applied to the background
-        perturbations prior to the analysis.
-    """
+    """Perform a simplified LETKF analysis using loaded dump data."""
 
     xb_matrix, mem_order, shapes = _stack_state(dump)
     innov, y_matrix = _stack_observations(dump, mem_order)
@@ -149,10 +228,8 @@ def letkf_das(
             raise ValueError("inflation must be positive")
         xb_pert = xb_pert * float(inflation) ** 0.5
 
-    # Observation-space anomalies (already mean removed in dump)
     a_matrix = y_matrix
 
-    # Compute analysis weights following Hunt et al. (2007)
     eye_k = np.eye(k)
     gain_matrix = (k - 1) * eye_k + a_matrix.T @ (r_inv[:, None] * a_matrix)
     gain_matrix += ridge * eye_k
@@ -165,19 +242,22 @@ def letkf_das(
     xa_mean = xb_mean + xb_pert @ weight_mean[:, None]
     xa_matrix = xa_pert + xa_mean
 
-    analysis_3d: Dict[str, np.ndarray] = {}
-    analysis_2d: Dict[str, np.ndarray] = {}
+    analysis_3d: Dict[str, Dict[str, np.ndarray]] = {mem: {} for mem in mem_order}
+    analysis_2d: Dict[str, Dict[str, np.ndarray]] = {mem: {} for mem in mem_order}
 
     for col_idx, mem in enumerate(mem_order):
         vector = xa_matrix[:, col_idx]
-        shape3d, shape2d = shapes[mem]
-        size3d = int(np.prod(shape3d))
         offset = 0
-        analysis_3d[mem] = vector[offset : offset + size3d].reshape(shape3d, order="F")
-        offset += size3d
-        if shape2d:
-            size2d = int(np.prod(shape2d))
-            analysis_2d[mem] = vector[offset : offset + size2d].reshape(shape2d, order="F")
+        for suffix, shape3d, shape2d in shapes[mem]:
+            size3d = int(np.prod(shape3d, dtype=np.int64))
+            block3d = vector[offset : offset + size3d].reshape(shape3d, order="F")
+            analysis_3d[mem][suffix] = block3d
+            offset += size3d
+            if shape2d:
+                size2d = int(np.prod(shape2d, dtype=np.int64))
+                block2d = vector[offset : offset + size2d].reshape(shape2d, order="F")
+                analysis_2d[mem][suffix] = block2d
+                offset += size2d
 
     return LetkfAnalysis(
         members_3d=analysis_3d,

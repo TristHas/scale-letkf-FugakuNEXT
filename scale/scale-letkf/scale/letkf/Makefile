@@ -1,6 +1,6 @@
 include ../configure
 
-PROGS   = letkf letkf_replay efso
+PROGS   = letkf efso
 
 OBJS    = letkf_obs.o letkf_dump.o efso_tools.o letkf_tools.o
 
@@ -45,13 +45,6 @@ letkf_dump.o:	letkf_dump.f90 letkf_obs.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
 letkf_tools.o:	letkf_tools.f90 letkf_obs.o efso_tools.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
-
-letkf_replay:	letkf_replay.o $(COMMON_DIR) $(OBS_DIR)
-	$(FC) $(FOPTS) $(FMCMODEL) -o letkf_replay letkf_replay.o \
-	$(COMMON_OBJS) $(OBS_OBJS) $(OBJS) $(SCALE_RM_OBJS) $(LIBS)
-
-letkf_replay.o:	letkf_replay.f90 $(OBJS) $(COMMON_DIR) $(OBS_DIR)
-	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) -I$(OBS_DIR) $(INCS)
 
 $(OBS_DIR):	FORCE
 	$(MAKE) -C $@ obsope_tools.o

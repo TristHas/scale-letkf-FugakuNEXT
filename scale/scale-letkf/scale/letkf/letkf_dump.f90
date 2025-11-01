@@ -18,7 +18,6 @@ MODULE letkf_dump
   public :: dump_letkf_obs_state
   public :: dump_letkf_gues_state
   public :: dump_letkf_analysis_state
-  public :: load_letkf_gues_state
   public :: load_letkf_obs_state
 
 CONTAINS
@@ -49,14 +48,6 @@ CONTAINS
     call export_state_dump(trim_dir(LETKF_INPUT_DUMP_DIR), use_prefix, anal3d, anal2d)
   END SUBROUTINE dump_letkf_analysis_state
 
-  SUBROUTINE load_letkf_gues_state(dump_dir, gues3d, gues2d)
-    character(len=*), intent(in) :: dump_dir
-    real(r_size), intent(out) :: gues3d(nij1,nlev,nens,nv3d)
-    real(r_size), intent(out) :: gues2d(nij1,nens,nv2d)
-
-    call import_gues_dump(trim_dir(dump_dir), gues3d, gues2d)
-  END SUBROUTINE load_letkf_gues_state
-
   SUBROUTINE load_letkf_obs_state(dump_dir)
     character(len=*), intent(in) :: dump_dir
 
@@ -69,100 +60,36 @@ CONTAINS
     real(r_size), intent(in) :: state3d(nij1,nlev,nens,nv3d)
     real(r_size), intent(in) :: state2d(nij1,nens,nv2d)
 
-    real(RP), allocatable :: v3dg(:,:,:,:)
-    real(RP), allocatable :: v2dg(:,:,:)
-    integer :: it, im, mstart, mend, ierr
+    real(RP), allocatable :: v3dr(:,:,:,:)
+    real(RP), allocatable :: v2dr(:,:,:)
+    character(len=filelenmax) :: file3d, file2d, suffix
+    integer :: ierr
     character(len=filelenmax) :: dir_local
 
     dir_local = base_dir
     call ensure_directory(dir_local)
 
-    allocate(v3dg(nlev,nlon,nlat,nv3d))
-    if (nv2d > 0) then
-      allocate(v2dg(nlon,nlat,nv2d))
-    else
-      allocate(v2dg(1,1,1))
+    suffix = domain_suffix()
+    call write_state_metadata(dir_local, suffix)
+
+    if (nv3d > 0) then
+      allocate(v3dr(nij1,nlev,nens,nv3d))
+      v3dr = real(state3d, RP)
+      file3d = build_rank_filename(dir_local, trim(prefix)//'3d', suffix)
+      call write_real4d(file3d, v3dr)
+      deallocate(v3dr)
     end if
 
-    do it = 1, nitmax
-      im = myrank_to_mem(it)
-      mstart = 1 + (it-1)*nprocs_e
-      mend   = min(it*nprocs_e, nens)
-      if (mstart > mend) cycle
+    if (nv2d > 0) then
+      allocate(v2dr(nij1,nens,nv2d))
+      v2dr = real(state2d, RP)
+      file2d = build_rank_filename(dir_local, trim(prefix)//'2d', suffix)
+      call write_real3d(file2d, v2dr)
+      deallocate(v2dr)
+    end if
 
-      if ( (im >= 1 .and. im <= MEMBER) ) then
-        call gather_grd_mpi_alltoall(mstart, mend, state3d, state2d, v3dg, v2dg)
-        call write_member_state(dir_local, prefix, im, v3dg, v2dg)
-      else
-        call gather_grd_mpi_alltoall(mstart, mend, state3d, state2d, v3dg, v2dg)
-      end if
-    end do
-
-    deallocate(v3dg)
-    deallocate(v2dg)
     call MPI_Barrier(MPI_COMM_e, ierr)
   END SUBROUTINE export_state_dump
-
-  SUBROUTINE write_member_state(dir_local, prefix, im, v3dg, v2dg)
-    character(len=*), intent(in) :: dir_local
-    character(len=*), intent(in) :: prefix
-    integer, intent(in) :: im
-    real(RP), intent(in) :: v3dg(nlev,nlon,nlat,nv3d)
-    real(RP), intent(in) :: v2dg(:,:,:)
-
-    character(len=filelenmax) :: file3d, file2d
-
-    file3d = build_member_filename(dir_local, trim(prefix)//'3d', im)
-    call write_real4d(file3d, v3dg)
-
-    if (nv2d > 0) then
-      file2d = build_member_filename(dir_local, trim(prefix)//'2d', im)
-      call write_real3d(file2d, v2dg(:,:,1:nv2d))
-    end if
-  END SUBROUTINE write_member_state
-
-  SUBROUTINE import_gues_dump(base_dir, gues3d, gues2d)
-    character(len=*), intent(in) :: base_dir
-    real(r_size), intent(out) :: gues3d(nij1,nlev,nens,nv3d)
-    real(r_size), intent(out) :: gues2d(nij1,nens,nv2d)
-
-    real(RP), allocatable :: v3dg(:,:,:,:)
-    real(RP), allocatable :: v2dg(:,:,:)
-    integer :: it, im, mstart, mend
-    character(len=filelenmax) :: file3d, file2d
-
-    allocate(v3dg(nlev,nlon,nlat,nv3d))
-    if (nv2d > 0) then
-      allocate(v2dg(nlon,nlat,nv2d))
-    else
-      allocate(v2dg(1,1,1))
-      v2dg = 0.0_RP
-    end if
-
-    do it = 1, nitmax
-      im = myrank_to_mem(it)
-      mstart = 1 + (it-1)*nprocs_e
-      mend   = min(it*nprocs_e, nens)
-      if (mstart > mend) cycle
-
-      if (im >= 1 .and. im <= MEMBER) then
-        file3d = build_member_filename(base_dir, 'gues3d', im)
-        call read_real4d(file3d, v3dg)
-        if (nv2d > 0) then
-          file2d = build_member_filename(base_dir, 'gues2d', im)
-          call read_real3d(file2d, v2dg(:,:,1:nv2d))
-        end if
-      else
-        v3dg = 0.0_RP
-        if (nv2d > 0) v2dg(:,:,1:nv2d) = 0.0_RP
-      end if
-
-      call scatter_grd_mpi_alltoall(mstart, mend, v3dg, v2dg, gues3d, gues2d)
-    end do
-
-    deallocate(v3dg)
-    deallocate(v2dg)
-  END SUBROUTINE import_gues_dump
 
   SUBROUTINE export_obsda_dump(base_dir)
     character(len=*), intent(in) :: base_dir
@@ -305,59 +232,6 @@ CONTAINS
     close(unit)
   END SUBROUTINE write_real3d
 
-  SUBROUTINE read_real4d(filename, data)
-    character(len=*), intent(in) :: filename
-    real(RP), intent(out) :: data(:,:,:,:)
-    integer(int32) :: nd, dims(4)
-    integer :: unit
-
-    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='old')
-    read(unit) nd
-    if (nd /= 4_int32) then
-      write(error_unit, '(A,1X,A)') 'letkf_dump: unexpected rank in file', trim(filename)
-      stop 1
-    end if
-    read(unit) dims
-    if (any(dims /= int((/size(data,1), size(data,2), size(data,3), size(data,4)/), int32))) then
-      write(error_unit, '(A,1X,A)') 'letkf_dump: size mismatch in file', trim(filename)
-      stop 1
-    end if
-    read(unit) data
-    close(unit)
-  END SUBROUTINE read_real4d
-
-  SUBROUTINE read_real3d(filename, data)
-    character(len=*), intent(in) :: filename
-    real(RP), intent(out) :: data(:,:,:)
-    integer(int32) :: nd, dims(3)
-    integer :: unit
-
-    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='old')
-    read(unit) nd
-    if (nd /= 3_int32) then
-      write(error_unit, '(A,1X,A)') 'letkf_dump: unexpected rank in file', trim(filename)
-      stop 1
-    end if
-    read(unit) dims
-    if (any(dims /= int((/size(data,1), size(data,2), size(data,3)/), int32))) then
-      write(error_unit, '(A,1X,A)') 'letkf_dump: size mismatch in file', trim(filename)
-      stop 1
-    end if
-    read(unit) data
-    close(unit)
-  END SUBROUTINE read_real3d
-
-  FUNCTION build_member_filename(base_dir, prefix, im) RESULT(path)
-    character(len=*), intent(in) :: base_dir
-    character(len=*), intent(in) :: prefix
-    integer, intent(in) :: im
-    character(len=filelenmax) :: path
-    character(len=memflen) :: mem_tag
-
-    mem_tag = mem_label(im)
-    path = trim(base_dir)//'/'//trim(prefix)//'_'//trim(mem_tag)//dump_suffix_ext
-  END FUNCTION build_member_filename
-
   FUNCTION mem_label(im) RESULT(tag)
     integer, intent(in) :: im
     character(len=memflen) :: tag
@@ -374,6 +248,82 @@ CONTAINS
       write(tag, '(I4.4)') im
     end if
   END FUNCTION mem_label
+
+  FUNCTION build_rank_filename(base_dir, prefix, suffix) RESULT(path)
+    character(len=*), intent(in) :: base_dir
+    character(len=*), intent(in) :: prefix
+    character(len=*), intent(in) :: suffix
+    character(len=filelenmax) :: path
+
+    path = trim(base_dir)//'/'//trim(prefix)//'_'//trim(suffix)//dump_suffix_ext
+  END FUNCTION build_rank_filename
+
+  SUBROUTINE write_state_metadata(dir_local, suffix)
+    character(len=*), intent(in) :: dir_local
+    character(len=*), intent(in) :: suffix
+
+    character(len=filelenmax) :: meta_file
+    integer :: unit
+    integer :: rank_idx
+    integer :: tile_i_start_rank, tile_j_start_rank
+    integer :: tile_i_size_rank, tile_j_size_rank
+    integer :: nij1_rank
+    logical :: have_tile
+    integer :: tile_ready_flag
+
+    rank_idx = myrank_e + 1
+    tile_i_start_rank = -1
+    tile_j_start_rank = -1
+    tile_i_size_rank = -1
+    tile_j_size_rank = -1
+    nij1_rank = -1
+
+    have_tile = tile_partition_ready
+    if (have_tile) then
+      if (.not. allocated(tile_i_start)) have_tile = .false.
+      if (rank_idx < 1) have_tile = .false.
+      if (have_tile .and. rank_idx > size(tile_i_start)) have_tile = .false.
+    end if
+
+    if (have_tile) then
+      tile_i_start_rank = tile_i_start(rank_idx)
+      tile_j_start_rank = tile_j_start(rank_idx)
+      tile_i_size_rank = tile_i_size(rank_idx)
+      tile_j_size_rank = tile_j_size(rank_idx)
+    end if
+
+    if (allocated(nij1node)) then
+      if (rank_idx >= 1 .and. rank_idx <= size(nij1node)) then
+        nij1_rank = nij1node(rank_idx)
+      end if
+    end if
+
+    meta_file = trim(dir_local)//'/state_meta_'//trim(suffix)//metadata_ext
+    tile_ready_flag = 0
+    if (tile_partition_ready) tile_ready_flag = 1
+
+    open(newunit=unit, file=trim(meta_file), status='replace', action='write')
+    write(unit,'(A)') 'meta_version=1'
+    write(unit,'(A)') 'domain_suffix='//trim(suffix)
+    write(unit,'(A,I0)') 'myrank=', myrank
+    write(unit,'(A,I0)') 'myrank_e=', myrank_e
+    write(unit,'(A,I0)') 'myrank_d=', myrank_d
+    write(unit,'(A,I0)') 'rank_index_e=', rank_idx
+    write(unit,'(A,I0)') 'nij1=', nij1
+    write(unit,'(A,I0)') 'nij1_rank=', nij1_rank
+    write(unit,'(A,I0)') 'nlev=', nlev
+    write(unit,'(A,I0)') 'nens=', nens
+    write(unit,'(A,I0)') 'nv3d=', nv3d
+    write(unit,'(A,I0)') 'nv2d=', nv2d
+    write(unit,'(A,I0)') 'nlon=', nlon
+    write(unit,'(A,I0)') 'nlat=', nlat
+    write(unit,'(A,I0)') 'tile_partition_ready=', tile_ready_flag
+    write(unit,'(A,I0)') 'tile_i_start=', tile_i_start_rank
+    write(unit,'(A,I0)') 'tile_j_start=', tile_j_start_rank
+    write(unit,'(A,I0)') 'tile_i_size=', tile_i_size_rank
+    write(unit,'(A,I0)') 'tile_j_size=', tile_j_size_rank
+    close(unit)
+  END SUBROUTINE write_state_metadata
 
   FUNCTION domain_suffix() RESULT(tag)
     character(len=8) :: tag
