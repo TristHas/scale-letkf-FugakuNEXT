@@ -24,6 +24,7 @@ module common_mpi_scale
 
   use scale_precision, only: RP
   use scale_comm_cartesC, only: COMM_datatype
+  use scale_prc_cartesC, only: PRC_NUM_X, PRC_NUM_Y
 #ifdef PNETCDF
   use scale_file, only: FILE_AGGREGATE
 #endif
@@ -53,6 +54,11 @@ module common_mpi_scale
   integer,allocatable,save :: ranke_to_mem(:,:)
   integer,allocatable,save :: myrank_to_mem(:)
   integer,save :: myrank_to_pe
+  integer,allocatable,save :: tile_i_start(:)
+  integer,allocatable,save :: tile_j_start(:)
+  integer,allocatable,save :: tile_i_size(:)
+  integer,allocatable,save :: tile_j_size(:)
+  logical,save :: tile_partition_ready = .false.
   logical,save :: myrank_use = .false.
 
   integer,save :: mydom = -1
@@ -94,15 +100,28 @@ subroutine initialize_mpi_scale
   use scale_prc, only: &
      PRC_MPIstart, &
      PRC_UNIVERSAL_setup, &
-     PRC_UNIVERSAL_myrank
+     PRC_UNIVERSAL_myrank, &
+     PRC_mpi_alive, &
+     PRC_ABORT_COMM_WORLD
+  use mpi, only: MPI_Initialized, MPI_COMM_WORLD
   implicit none
   integer :: universal_comm   ! dummy
   integer :: universal_nprocs ! dummy
   integer :: universal_myrank ! dummy
   logical :: universal_master ! dummy
-!  integer :: ierr
+  logical :: already_initialized
+  integer :: ierr_mpi
 
-  call PRC_MPIstart( universal_comm ) ! [OUT]
+  call MPI_Initialized(already_initialized, ierr_mpi)
+  if (ierr_mpi /= 0) already_initialized = .false.
+
+  if (.not. already_initialized) then
+    call PRC_MPIstart( universal_comm ) ! [OUT]
+  else
+    universal_comm = MPI_COMM_WORLD
+    PRC_mpi_alive = .true.
+    PRC_ABORT_COMM_WORLD = MPI_COMM_WORLD
+  end if
 
 !  call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
 !  call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
@@ -130,11 +149,17 @@ end subroutine initialize_mpi_scale
 !-------------------------------------------------------------------------------
 subroutine finalize_mpi_scale
 !  use scale_prc, only: PRC_MPIfinish
+  use mpi, only: MPI_Finalized, MPI_Finalize
   implicit none
   integer :: ierr
+  logical :: already_finalized
 
 !  call PRC_MPIfinish
-  call MPI_Finalize(ierr)
+  call MPI_Finalized(already_finalized, ierr)
+  if (ierr /= 0) already_finalized = .false.
+  if (.not. already_finalized) then
+    call MPI_Finalize(ierr)
+  end if
 
   return
 end subroutine finalize_mpi_scale
@@ -307,6 +332,8 @@ subroutine set_common_mpi_grid
       nij1node(n) = nij1max - 1
     end if
   end do
+
+  call init_tile_partition()
 
   ALLOCATE(rig1(nij1))
   ALLOCATE(rjg1(nij1))
@@ -1655,17 +1682,118 @@ END SUBROUTINE set_alltoallv_counts
 !-------------------------------------------------------------------------------
 ! gridded data -> buffer
 !-------------------------------------------------------------------------------
+SUBROUTINE init_tile_partition()
+  INTEGER :: px_try(2), py_try(2)
+  INTEGER :: attempt, px, py
+  INTEGER :: ix, iy, m
+  INTEGER :: base_x, rem_x, base_y, rem_y
+  INTEGER :: offset
+  INTEGER, allocatable :: x_offsets(:), x_sizes(:)
+  INTEGER, allocatable :: y_offsets(:), y_sizes(:)
+  INTEGER :: isize, jsize
+  LOGICAL :: ok
+
+  tile_partition_ready = .false.
+
+  px_try(1) = PRC_NUM_X
+  py_try(1) = PRC_NUM_Y
+  px_try(2) = PRC_NUM_Y
+  py_try(2) = PRC_NUM_X
+
+  DO attempt = 1, 2
+    px = px_try(attempt)
+    py = py_try(attempt)
+    IF (px * py /= nprocs_e) CYCLE
+
+    allocate(x_offsets(px), x_sizes(px))
+    allocate(y_offsets(py), y_sizes(py))
+
+    base_x = nlon / px
+    rem_x = MOD(nlon, px)
+    offset = 0
+    DO ix = 1, px
+      x_offsets(ix) = offset
+      x_sizes(ix) = base_x
+      IF (ix <= rem_x) x_sizes(ix) = x_sizes(ix) + 1
+      offset = offset + x_sizes(ix)
+    END DO
+    IF (offset /= nlon) THEN
+      deallocate(x_offsets, x_sizes, y_offsets, y_sizes)
+      CYCLE
+    END IF
+
+    base_y = nlat / py
+    rem_y = MOD(nlat, py)
+    offset = 0
+    DO iy = 1, py
+      y_offsets(iy) = offset
+      y_sizes(iy) = base_y
+      IF (iy <= rem_y) y_sizes(iy) = y_sizes(iy) + 1
+      offset = offset + y_sizes(iy)
+    END DO
+    IF (offset /= nlat) THEN
+      deallocate(x_offsets, x_sizes, y_offsets, y_sizes)
+      CYCLE
+    END IF
+
+    ok = .true.
+    DO iy = 1, py
+      DO ix = 1, px
+        m = (iy-1) * px + ix
+        IF (m > nprocs_e) THEN
+          ok = .false.
+          EXIT
+        END IF
+        isize = x_sizes(ix)
+        jsize = y_sizes(iy)
+        IF (isize * jsize /= nij1node(m)) THEN
+          ok = .false.
+          EXIT
+        END IF
+      END DO
+      IF (.not. ok) EXIT
+    END DO
+
+    IF (ok) THEN
+      IF (.not. allocated(tile_i_start)) THEN
+        allocate(tile_i_start(nprocs_e))
+        allocate(tile_j_start(nprocs_e))
+        allocate(tile_i_size(nprocs_e))
+        allocate(tile_j_size(nprocs_e))
+      END IF
+      DO iy = 1, py
+        DO ix = 1, px
+          m = (iy-1) * px + ix
+          tile_i_start(m) = x_offsets(ix) + 1
+          tile_j_start(m) = y_offsets(iy) + 1
+          tile_i_size(m) = x_sizes(ix)
+          tile_j_size(m) = y_sizes(iy)
+        END DO
+      END DO
+      tile_partition_ready = .true.
+      deallocate(x_offsets, x_sizes, y_offsets, y_sizes)
+      EXIT
+    END IF
+
+    deallocate(x_offsets, x_sizes, y_offsets, y_sizes)
+  END DO
+
+END SUBROUTINE init_tile_partition
+
 SUBROUTINE grd_to_buf(np,grd,buf)
   INTEGER,INTENT(IN) :: np
   REAL(RP),INTENT(IN) :: grd(nlon,nlat)
   REAL(RP),INTENT(OUT) :: buf(nij1max,np)
   INTEGER :: i,j,m,ilon,ilat
+  INTEGER :: ii,jj,idx
+  INTEGER :: istart,jstart,isize,jsize
 
-  DO m=1,np
-    DO i=1,nij1node(m)
-      j = m-1 + np * (i-1)
-      ilon = MOD(j,nlon) + 1
-      ilat = (j-ilon+1) / nlon + 1
+  IF (.not. tile_partition_ready) THEN
+    DO m=1,np
+      DO i=1,nij1node(m)
+        j = m-1 + np * (i-1)
+        ilon = MOD(j,nlon) + 1
+        ilat = (j-ilon+1) / nlon + 1
 #ifdef LETKF_DEBUG
 if (i < 1 .or. i > nij1max .or. m < 1 .or. m > np .or. ilon < 1 .or. ilon > nlon .or. ilat < 1 .or. ilat > nlat) then
   write(6, *) '[Error] ######', np, nij1max
@@ -1673,11 +1801,32 @@ if (i < 1 .or. i > nij1max .or. m < 1 .or. m > np .or. ilon < 1 .or. ilon > nlon
   stop
 end if
 #endif
-      buf(i,m) = grd(ilon,ilat)
+        buf(i,m) = grd(ilon,ilat)
+      END DO
+      IF(nij1node(m) < nij1max) buf(nij1max,m) = undef
     END DO
-  END DO
+    RETURN
+  END IF
 
   DO m=1,np
+    istart = tile_i_start(m)
+    jstart = tile_j_start(m)
+    isize = tile_i_size(m)
+    jsize = tile_j_size(m)
+    idx = 0
+    DO jj = 0, jsize-1
+      DO ii = 0, isize-1
+        idx = idx + 1
+        IF (idx > nij1node(m)) EXIT
+        buf(idx,m) = grd(istart+ii, jstart+jj)
+      END DO
+      IF (idx >= nij1node(m)) EXIT
+    END DO
+    IF (idx < nij1node(m)) THEN
+      DO i = idx+1, nij1node(m)
+        buf(i,m) = undef
+      END DO
+    END IF
     IF(nij1node(m) < nij1max) buf(nij1max,m) = undef
   END DO
 
@@ -1692,13 +1841,35 @@ SUBROUTINE buf_to_grd(np,buf,grd)
   REAL(RP),INTENT(IN) :: buf(nij1max,np)
   REAL(RP),INTENT(OUT) :: grd(nlon,nlat)
   INTEGER :: i,j,m,ilon,ilat
+  INTEGER :: ii,jj,idx
+  INTEGER :: istart,jstart,isize,jsize
 
+  IF (.not. tile_partition_ready) THEN
+    DO m=1,np
+      DO i=1,nij1node(m)
+        j = m-1 + np * (i-1)
+        ilon = MOD(j,nlon) + 1
+        ilat = (j-ilon+1) / nlon + 1
+        grd(ilon,ilat) = buf(i,m)
+      END DO
+    END DO
+    RETURN
+  END IF
+
+  grd(:,:) = 0.0_RP
   DO m=1,np
-    DO i=1,nij1node(m)
-      j = m-1 + np * (i-1)
-      ilon = MOD(j,nlon) + 1
-      ilat = (j-ilon+1) / nlon + 1
-      grd(ilon,ilat) = buf(i,m)
+    istart = tile_i_start(m)
+    jstart = tile_j_start(m)
+    isize = tile_i_size(m)
+    jsize = tile_j_size(m)
+    idx = 0
+    DO jj = 0, jsize-1
+      DO ii = 0, isize-1
+        idx = idx + 1
+        IF (idx > nij1node(m)) EXIT
+        grd(istart+ii, jstart+jj) = buf(idx,m)
+      END DO
+      IF (idx >= nij1node(m)) EXIT
     END DO
   END DO
 

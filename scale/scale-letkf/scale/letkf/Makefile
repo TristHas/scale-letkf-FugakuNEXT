@@ -2,7 +2,7 @@ include ../configure
 
 PROGS   = letkf efso
 
-OBJS    = letkf_obs.o efso_tools.o letkf_tools.o
+OBJS    = letkf_obs.o letkf_dump.o efso_tools.o letkf_tools.o
 
 COMMON_DIR = ../common
 
@@ -29,7 +29,6 @@ LIBS    = $(SCALE_LIB) $(NETCDF_LIB) $(LAPACK_LIB) $(KEVD_LIB)
 
 TEST_BIN_DIR ?= ../../../../test/SC23/bin
 
-
 .PHONY:	all clean FORCE
 
 all:	$(PROGS)
@@ -44,6 +43,8 @@ letkf.o:	letkf.f90 $(OBJS) $(COMMON_DIR) $(OBS_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) -I$(OBS_DIR) $(INCS)
 
 letkf_obs.o:	letkf_obs.f90 $(COMMON_DIR)
+	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
+letkf_dump.o:	letkf_dump.f90 letkf_obs.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
 letkf_tools.o:	letkf_tools.f90 letkf_obs.o efso_tools.o $(COMMON_DIR)
 	$(FC) $(FOPTS) -c $< -I$(COMMON_DIR) $(INCS)
