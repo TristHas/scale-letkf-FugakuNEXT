@@ -126,3 +126,79 @@ def convert_scale_letkf_var(ds):
     control_stack = control_stack.assign_coords(variable=list(CONTROL_ORDER))
     drop_targets = [name for name in ("xh", "yh", "zh", "species") if name in control_stack.coords]
     return control_stack.drop_vars(drop_targets) if drop_targets else control_stack
+
+
+def convert_letkf_scale_var(control: xr.DataArray) -> xr.Dataset:
+    """Map LETKF control variables back to SCALE prognostic fields."""
+    if "ens" not in control.dims:
+        raise ValueError("LETKF control array must include an 'ens' dimension.")
+    ctrl = control.transpose("variable", "ens", "z", "y", "x")
+
+    def _sel(name: str) -> xr.DataArray:
+        return ctrl.sel(variable=name).reset_coords(drop=True)
+
+    # Moisture block
+    moist = xr.concat([_sel(name) for name in TRACER_CV["species"].values], dim="species")
+    moist = moist.assign_coords(species=TRACER_CV["species"])
+    moist = moist.transpose("species", "ens", "z", "y", "x")
+
+    qdry = (1.0 - moist.sum("species")).clip(min=1e-12)
+    rtot = (RDRY * qdry + RVAP * moist.sel(species="QV")).reset_coords(drop=True)
+    cv_tot = (CVDry * qdry + (moist * TRACER_CV).sum("species")).reset_coords(drop=True)
+
+    pressure = _sel("P").transpose("ens", "z", "y", "x")
+    temperature = _sel("T").transpose("ens", "z", "y", "x")
+
+    rho = (pressure / (rtot * temperature)).reset_coords(drop=True)
+    cvovcp = (cv_tot / (cv_tot + rtot)).reset_coords(drop=True)
+    rhot = (PRE00 / rtot * (pressure / PRE00) ** cvovcp).reset_coords(drop=True)
+
+    momx_mass = (rho * _sel("U").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
+    momy_mass = (rho * _sel("V").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
+    momz_mass = (rho * _sel("W").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
+    momz_faces = momz_mass.pad(z=(1, 0), mode="edge").rename({"z": "zh"})
+
+    x_mass = ctrl["x"].copy()
+    y_mass = ctrl["y"].copy()
+    z_mass = ctrl["z"].copy()
+    for coord in (x_mass, y_mass, z_mass):
+        coord.attrs["halo_local"] = (0, 0)
+
+    xh = xr.DataArray(x_mass.values, dims=("xh",), coords={"xh": x_mass.values}, attrs={"halo_local": (0, 0)})
+    yh = xr.DataArray(y_mass.values, dims=("yh",), coords={"yh": y_mass.values}, attrs={"halo_local": (0, 0)})
+    zh_vals = np.arange(z_mass.size + 1, dtype=np.float64)
+    zh = xr.DataArray(zh_vals, dims=("zh",), attrs={"halo_local": (0, 0)})
+
+    momx_data = momx_mass.transpose("ens", "y", "x", "z").rename({"x": "xh"}).assign_coords(xh=xh.values)
+    momy_data = momy_mass.transpose("ens", "y", "x", "z").rename({"y": "yh"}).assign_coords(yh=yh.values)
+    momz_data = momz_faces.assign_coords(zh=zh.values).transpose("ens", "y", "x", "zh")
+
+    def _moist(name: str) -> xr.DataArray:
+        return moist.sel(species=name).reset_coords(drop=True)
+
+    dataset = xr.Dataset(
+        data_vars={
+            "DENS": rho.transpose("ens", "y", "x", "z"),
+            "RHOT": rhot.transpose("ens", "y", "x", "z"),
+            "MOMX": momx_data,
+            "MOMY": momy_data,
+            "MOMZ": momz_data,
+            "QV": _moist("QV").transpose("ens", "y", "x", "z"),
+            "QC": _moist("QC").transpose("ens", "y", "x", "z"),
+            "QR": _moist("QR").transpose("ens", "y", "x", "z"),
+            "QI": _moist("QI").transpose("ens", "y", "x", "z"),
+            "QS": _moist("QS").transpose("ens", "y", "x", "z"),
+            "QG": _moist("QG").transpose("ens", "y", "x", "z"),
+        },
+        coords={
+            "x": x_mass,
+            "y": y_mass,
+            "z": z_mass,
+            "xh": xh,
+            "yh": yh,
+            "zh": zh,
+            "ens": ctrl["ens"],
+        },
+    )
+
+    return dataset
