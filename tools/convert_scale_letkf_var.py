@@ -72,12 +72,14 @@ def convert_scale_letkf_var(ds):
     moist = moist.assign_coords(species=TRACER_CV["species"]).transpose("species", "z", "y", "x")
     # U winds (x-direction)
     momx = deundef(strip_halo(ds["MOMX"], halo)).astype(np.float64).transpose("z", "y", "xh")
-    rho_xh = rho.interp(x=momx["xh"])
-    u_mass = (momx / rho_xh).interp(xh=x_mass, kwargs={"fill_value": "extrapolate"})
+    # state_trans uses the same index for MOMX and the mass grid; align coordinates to mirror that.
+    momx_mass = momx.rename({"xh": "x"}).assign_coords(x=x_mass)
+    u_mass = momx_mass / rho
     # V winds (y-direction)
     momy = deundef(strip_halo(ds["MOMY"], halo)).astype(np.float64).transpose("z", "yh", "x")
-    rho_yh = rho.interp(y=momy["yh"])  # density on the staggered Y faces
-    v_mass = (momy / rho_yh).interp(yh=rho["y"], kwargs={"fill_value": "extrapolate"})
+    # Same for MOMY: treat the staggered axis as colocated with the mass points.
+    momy_mass = momy.rename({"yh": "y"}).assign_coords(y=y_mass)
+    v_mass = momy_mass / rho
     # W winds (z-direction)
     momz = deundef(strip_halo(ds["MOMZ"], halo)).astype(np.float64).transpose("zh", "y", "x")
     # SCALE's state_trans pairs MOMZ(k+1/2) with mass level k; drop the bottom face to mirror that behaviour.
