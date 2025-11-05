@@ -13,13 +13,12 @@ RVAP = 461.50
 CPVAP = 1846.00
 CVVAP = CPVAP - RVAP
 
-CV_WATER = 4218.0
-CV_ICE = 2106.0
 PRE00 = 100000.0
 FILL = -9.9999e30
 
+# MATCH LETKF: all moist tracers use the vapor Cv in state_trans.
 TRACER_CV = xr.DataArray(
-  [CVVAP, CV_WATER, CV_WATER, CV_ICE, CV_ICE, CV_ICE],
+  [CVVAP, CVVAP, CVVAP, CVVAP, CVVAP, CVVAP],
   dims=("species",),
   coords={"species": ["QV", "QC", "QR", "QI", "QS", "QG"]},
 )
@@ -93,7 +92,7 @@ def convert_scale_letkf_var(ds):
     # Thermodynamic conversion: rhot -> (T, P), keep moisture as-is
     # ------------------------------------------------------------------
     moist_clean = moist.fillna(0.0)
-    qdry = (1.0 - moist_clean.sum("species")).clip(min=1e-12)
+    qdry = 1.0 - moist_clean.sum("species")
     
     cv_tot = CVDry * qdry + (moist_clean * TRACER_CV).sum("species")
     rtot = RDRY * qdry + RVAP * moist_clean.sel(species="QV")
@@ -101,10 +100,9 @@ def convert_scale_letkf_var(ds):
     base = (rhot * rtot) / PRE00
     valid = (base > 0) & (rho > 0) & (cv_tot > 0) & (rtot > 0)
     
-    log_base = xr.where(valid, np.log(base), np.nan)
     gamma = xr.where(valid, (cv_tot + rtot) / cv_tot, np.nan)
     
-    pressure = xr.where(valid, PRE00 * np.exp(gamma * log_base), np.nan)
+    pressure = xr.where(valid, PRE00 * base ** gamma, np.nan)
     temperature = xr.where(valid, pressure / (rho * rtot), np.nan)
     # ------------------------------------------------------------------
     # Assemble LETKF control variables
