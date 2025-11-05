@@ -80,8 +80,9 @@ def convert_scale_letkf_var(ds):
     v_mass = (momy / rho_yh).interp(yh=rho["y"], kwargs={"fill_value": "extrapolate"})
     # W winds (z-direction)
     momz = deundef(strip_halo(ds["MOMZ"], halo)).astype(np.float64).transpose("zh", "y", "x")
-    rho_zh = rho.interp(z=momz["zh"])
-    w_mass = (momz / rho_zh).interp(zh=z_mass, kwargs={"fill_value": "extrapolate"})#.rename({"zh": "z"})
+    # SCALE's state_trans pairs MOMZ(k+1/2) with mass level k; drop the bottom face to mirror that behaviour.
+    momz_mass = momz.isel(zh=slice(1, None)).rename({"zh": "z"}).assign_coords(z=z_mass)
+    w_mass = momz_mass / rho
     # Reorder wind dims
     u_mass = u_mass.transpose("z", "y", "x")
     v_mass = v_mass.transpose("z", "y", "x")
@@ -123,4 +124,5 @@ def convert_scale_letkf_var(ds):
       dim="variable",
     )
     control_stack = control_stack.assign_coords(variable=list(CONTROL_ORDER))
-    return control_stack.drop_vars(["xh", "yh", "zh", "species"])
+    drop_targets = [name for name in ("xh", "yh", "zh", "species") if name in control_stack.coords]
+    return control_stack.drop_vars(drop_targets) if drop_targets else control_stack
