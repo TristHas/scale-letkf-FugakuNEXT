@@ -94,6 +94,7 @@ PROGRAM letkf
 
     allocate (obs(OBS_IN_NUM))
     call read_obs_all_mpi(obs)
+    call dump_letkf_raw_obs(obs)
 
     call mpi_timer('READ_OBS', 1, barrier=MPI_COMM_a)
 
@@ -122,6 +123,7 @@ PROGRAM letkf
 
     call set_letkf_obs
     call dump_letkf_obs_after_set
+    call dump_letkf_obsgrd
 
     call mpi_timer('PROCESS_OBS', 1, barrier=MPI_COMM_a)
 

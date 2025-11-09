@@ -22,6 +22,14 @@ y_offset = {"pe" + str(i).zfill(6) : 50 + (100  * (i // 4)) * 256 for i in range
 X_LEVELS =  {k: v+np.arange(320)*100 for k,v in x_offset.items()}
 Y_LEVELS =  {k: v+np.arange(256)*100 for k,v in y_offset.items()}
 _OBSDA_FILE_RE = re.compile(r"obsda_(?P<var>.+)_(?P<pe>pe[0-9a-z]+)\.(?P<member>[^.]+)\.bin$", re.IGNORECASE)
+_OBS_RAW_FILE_RE = re.compile(
+    r"(?P<prefix>obs\d{4})_(?P<field>[a-z0-9]+)_(?P<pe>pe[0-9a-z]+)\.(?P<member>[^.]+)\.bin$",
+    re.IGNORECASE,
+)
+_OBSGRD_FILE_RE = re.compile(
+    r"(?P<base>type\d{4})_(?P<field>[a-z_]+)_(?P<pe>pe[0-9a-z]+)\.(?P<member>[^.]+)\.bin$",
+    re.IGNORECASE,
+)
 _SPECIAL_MEMBERS = {
     "mean": "memmean",
     "memmean": "memmean",
@@ -31,6 +39,16 @@ _SPECIAL_MEMBERS = {
     "memmgue": "memmgue",
     "sprd": "memsprd",
     "memsprd": "memsprd",
+}
+_OBS_RAW_INT_FIELDS = {"elm", "typ", "rank"}
+_OBSGRD_INT_ARRAYS = {
+    "n": ">i4",
+    "ac": ">i4",
+    "tot": ">i4",
+    "n_ext": ">i4",
+    "ac_ext": ">i4",
+    "tot_sub": ">i4",
+    "tot_g": ">i4",
 }
 
 def _read_binary_array(path: Path, dtype: str) -> np.ndarray:
@@ -127,6 +145,85 @@ def load_obsda(dump_dir: str | Path, pe_tag: str | int) -> xr.Dataset:
 
 def load_obsda_sorted(dump_dir: str | Path, pe_tag: str | int) -> xr.Dataset:
     return _load_obsda_dataset(dump_dir, "obsda_after_set_letkf", pe_tag)
+
+
+def load_obs_raw(
+    dump_dir: str | Path,
+    *,
+    pe_tag: str | int | None = None,
+    member: str | int | None = None,
+) -> list[dict]:
+    """Load the raw observation dumps (obs_info arrays) as a list of dictionaries."""
+    base_dir = Path(dump_dir) / "obs_raw"
+    if not base_dir.exists():
+        raise FileNotFoundError(f"{base_dir} not found")
+    pe_norm = _normalize_pe_tag(pe_tag) if pe_tag is not None else None
+    mem_norm = _normalize_member(member) if member is not None else None
+
+    records: list[dict] = []
+    for obs_dir in sorted(p for p in base_dir.iterdir() if p.is_dir()):
+        obs_index = _extract_obs_index(obs_dir.name)
+        groups: dict[tuple[str, str], dict[str, Path]] = {}
+        for path in sorted(obs_dir.glob("*.bin")):
+            match = _OBS_RAW_FILE_RE.match(path.name)
+            if not match:
+                continue
+            group_key = (match.group("pe"), match.group("member"))
+            field = match.group("field").lower()
+            groups.setdefault(group_key, {})[field] = path
+        if not groups:
+            continue
+        group_key, files = _select_obs_group(groups, pe_norm, mem_norm)
+        pe_sel, mem_sel = group_key
+        meta_path = obs_dir / f"obs_meta_{pe_sel}.{mem_sel}.txt"
+        meta = _read_text_metadata(meta_path)
+        data = {}
+        for field, path in sorted(files.items()):
+            dtype = ">i4" if field in _OBS_RAW_INT_FIELDS else ">f8"
+            data[field] = _read_binary_array(path, dtype)
+        records.append(
+            {
+                "index": obs_index,
+                "pe": pe_sel,
+                "member": mem_sel,
+                "meta": meta,
+                "data": data,
+            }
+        )
+    if not records:
+        raise FileNotFoundError(f"No observation dumps found under {base_dir}")
+    return records
+
+
+def load_obsgrd(
+    dump_dir: str | Path,
+    pe_tag: str | int,
+    member: str | int,
+) -> dict:
+    """Load the observation-sorting grid diagnostics."""
+    stage_dir = Path(dump_dir) / "obsgrd"
+    if not stage_dir.exists():
+        raise FileNotFoundError(f"{stage_dir} not found")
+    pe_norm = _normalize_pe_tag(pe_tag)
+    mem_norm = _normalize_member(member)
+    summary_path = stage_dir / f"obsgrd_summary_{pe_norm}.{mem_norm}.txt"
+    summary = _read_text_metadata(summary_path)
+    if not summary:
+        raise FileNotFoundError(f"{summary_path} not found or empty")
+    nctype = int(summary.get("nctype", 0))
+    ctypes: list[dict] = []
+    for ictype in range(1, nctype + 1):
+        cdir = stage_dir / f"type_{ictype:05d}"
+        meta_path = cdir / f"obsgrd_meta_{pe_norm}.{mem_norm}.txt"
+        meta = _read_text_metadata(meta_path)
+        base_tag = f"type{ictype:04d}"
+        arrays: dict[str, np.ndarray] = {}
+        for field, dtype in _OBSGRD_INT_ARRAYS.items():
+            path = cdir / f"{base_tag}_{field}_{pe_norm}.{mem_norm}.bin"
+            if path.exists():
+                arrays[field] = _read_binary_array(path, dtype)
+        ctypes.append({"ctype": ictype, "meta": meta, "arrays": arrays})
+    return {"summary": summary, "ctypes": ctypes}
 
 
 def _load_obsda_var_from_stage(
@@ -275,3 +372,52 @@ def _normalize_member(member: str | int) -> str:
     if tag.isdigit():
         return f"mem{int(tag):04d}"
     raise ValueError(f"Cannot parse member '{member}'")
+
+
+def _extract_obs_index(dirname: str) -> int:
+    match = re.match(r"obs(\d{4})", dirname.lower())
+    if not match:
+        raise ValueError(f"Unrecognized observation directory '{dirname}'")
+    return int(match.group(1))
+
+
+def _select_obs_group(
+    groups: dict[tuple[str, str], dict[str, Path]],
+    pe_norm: str | None,
+    mem_norm: str | None,
+) -> tuple[tuple[str, str], dict[str, Path]]:
+    for (pe, mem), files in sorted(groups.items()):
+        if pe_norm is not None and pe != pe_norm:
+            continue
+        if mem_norm is not None and mem != mem_norm:
+            continue
+        return (pe, mem), files
+    raise FileNotFoundError(
+        f"No observation dump matching pe={pe_norm} member={mem_norm}"
+    )
+
+
+def _read_text_metadata(path: Path) -> dict[str, int | float | str]:
+    if not path.exists():
+        return {}
+    meta: dict[str, int | float | str] = {}
+    with path.open() as fh:
+        for line in fh:
+            if "=" not in line:
+                continue
+            key, value = line.strip().split("=", 1)
+            meta[key.strip()] = _coerce_value(value.strip())
+    return meta
+
+
+def _coerce_value(text: str) -> int | float | str:
+    if not text:
+        return text
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text

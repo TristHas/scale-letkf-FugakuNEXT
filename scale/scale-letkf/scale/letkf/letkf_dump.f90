@@ -6,8 +6,8 @@ MODULE letkf_dump
   use common_mpi
   use common_mpi_scale
   use common_scale, only: nlon, nlat, nlev
-  use common_obs_scale, only: obs_da_value, obsda_sort
-  use letkf_obs, only: obsda
+  use common_obs_scale, only: obs_da_value, obsda_sort, obs_info, max_obs_info_meta
+  use letkf_obs, only: obsda, obsgrd, nctype, hori_loc_ctype, vert_loc_ctype, nobstotal
   implicit none
   private
 
@@ -20,6 +20,8 @@ MODULE letkf_dump
   public :: dump_letkf_obs_after_set
   public :: dump_letkf_gues_state
   public :: dump_letkf_analysis_state
+  public :: dump_letkf_raw_obs
+  public :: dump_letkf_obsgrd
 
 CONTAINS
 
@@ -59,6 +61,71 @@ CONTAINS
     if (.not. LETKF_INPUT_DUMP) return
     call export_state_dump(trim_dir(LETKF_INPUT_DUMP_DIR), use_prefix, anal3d, anal2d)
   END SUBROUTINE dump_letkf_analysis_state
+
+  SUBROUTINE dump_letkf_raw_obs(obs_in)
+    type(obs_info), intent(in) :: obs_in(:)
+
+    integer :: iof, ierr
+    character(len=filelenmax) :: base_dir
+    character(len=filelenmax) :: dir_stage
+    character(len=filelenmax) :: obs_dir
+    character(len=16) :: obs_tag
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+
+    base_dir = trim_dir(LETKF_INPUT_DUMP_DIR)
+    dir_stage = append_dir(base_dir, 'obs_raw')
+    call ensure_directory(dir_stage)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    do iof = 1, size(obs_in)
+      write(obs_tag,'(A3,I4.4)') 'obs', iof
+      obs_dir = append_dir(dir_stage, trim(obs_tag))
+      call ensure_directory(obs_dir)
+      if (myrank == 0) then
+        call write_obs_record(obs_dir, obs_in(iof), iof, domain_tag, ensemble_tag)
+      end if
+    end do
+
+    call MPI_Barrier(MPI_COMM_WORLD, ierr)
+  END SUBROUTINE dump_letkf_raw_obs
+
+  SUBROUTINE dump_letkf_obsgrd()
+    integer :: ictype, ierr
+    character(len=filelenmax) :: base_dir
+    character(len=filelenmax) :: dir_stage
+    character(len=filelenmax) :: ctype_dir
+    character(len=12) :: ctype_tag
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+    if (.not. allocated(obsgrd)) return
+    if (nctype <= 0) return
+
+    base_dir = trim_dir(LETKF_INPUT_DUMP_DIR)
+    dir_stage = append_dir(base_dir, 'obsgrd')
+    call ensure_directory(dir_stage)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    call write_obsgrd_summary(dir_stage, domain_tag, ensemble_tag)
+
+    do ictype = 1, nctype
+      write(ctype_tag,'(A5,I5.5)') 'type_', ictype
+      ctype_dir = append_dir(dir_stage, trim(ctype_tag))
+      call ensure_directory(ctype_dir)
+      call write_obsgrd_meta(ctype_dir, ictype, domain_tag, ensemble_tag)
+      call dump_obsgrd_arrays(ctype_dir, ictype, domain_tag, ensemble_tag)
+    end do
+
+    call MPI_Barrier(MPI_COMM_WORLD, ierr)
+  END SUBROUTINE dump_letkf_obsgrd
 
   SUBROUTINE export_state_dump(base_dir, prefix, state3d, state2d)
     character(len=*), intent(in) :: base_dir
@@ -187,6 +254,176 @@ CONTAINS
     call MPI_Barrier(MPI_COMM_d, ierr)
   END SUBROUTINE export_obsda_dump
 
+  SUBROUTINE write_obs_record(obs_dir, obs_rec, obs_index, domain_tag, ensemble_tag)
+    character(len=*), intent(in) :: obs_dir
+    type(obs_info), intent(in) :: obs_rec
+    integer, intent(in) :: obs_index
+    character(len=*), intent(in) :: domain_tag
+    character(len=*), intent(in) :: ensemble_tag
+
+    character(len=filelenmax) :: file_name
+    character(len=memflen+16) :: prefix_base
+
+    prefix_base = trim(obs_dir_tag(obs_index))
+
+    call write_obs_meta(obs_dir, obs_rec, obs_index, domain_tag, ensemble_tag)
+
+    if (allocated(obs_rec%elm)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_elm', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_rec%elm)
+    end if
+    if (allocated(obs_rec%lon)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_lon', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%lon)
+    end if
+    if (allocated(obs_rec%lat)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_lat', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%lat)
+    end if
+    if (allocated(obs_rec%lev)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_lev', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%lev)
+    end if
+    if (allocated(obs_rec%dat)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_dat', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%dat)
+    end if
+    if (allocated(obs_rec%err)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_err', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%err)
+    end if
+    if (allocated(obs_rec%typ)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_typ', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_rec%typ)
+    end if
+    if (allocated(obs_rec%dif)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_dif', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%dif)
+    end if
+    if (allocated(obs_rec%ri)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_ri', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%ri)
+    end if
+    if (allocated(obs_rec%rj)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_rj', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_rec%rj)
+    end if
+    if (allocated(obs_rec%rank)) then
+      file_name = build_rank_filename(obs_dir, trim(prefix_base)//'_rank', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_rec%rank)
+    end if
+  END SUBROUTINE write_obs_record
+
+  SUBROUTINE write_obs_meta(obs_dir, obs_rec, obs_index, domain_tag, ensemble_tag)
+    character(len=*), intent(in) :: obs_dir
+    type(obs_info), intent(in) :: obs_rec
+    integer, intent(in) :: obs_index
+    character(len=*), intent(in) :: domain_tag
+    character(len=*), intent(in) :: ensemble_tag
+
+    character(len=filelenmax) :: meta_file
+    integer :: unit, i
+
+    meta_file = trim(obs_dir)//'/obs_meta_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
+    open(newunit=unit, file=trim(meta_file), status='replace', action='write')
+    write(unit,'(A,I0)') 'obs_index=', obs_index
+    write(unit,'(A,I0)') 'nobs=', obs_rec%nobs
+    do i = 1, max_obs_info_meta
+      write(unit,'(A,I0,A,F24.10)') 'meta(', i, ')=', obs_rec%meta(i)
+    end do
+    close(unit)
+  END SUBROUTINE write_obs_meta
+
+  FUNCTION obs_dir_tag(obs_index) RESULT(tag)
+    integer, intent(in) :: obs_index
+    character(len=16) :: tag
+    write(tag,'("obs",I4.4)') obs_index
+  END FUNCTION obs_dir_tag
+
+  SUBROUTINE write_obsgrd_summary(dir_stage, domain_tag, ensemble_tag)
+    character(len=*), intent(in) :: dir_stage
+    character(len=*), intent(in) :: domain_tag
+    character(len=*), intent(in) :: ensemble_tag
+
+    character(len=filelenmax) :: meta_file
+    character(len=filelenmax) :: file_name
+    integer :: unit
+
+    meta_file = trim(dir_stage)//'/obsgrd_summary_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
+    open(newunit=unit, file=trim(meta_file), status='replace', action='write')
+    write(unit,'(A,I0)') 'nctype=', nctype
+    write(unit,'(A,I0)') 'nobstotal=', nobstotal
+    close(unit)
+
+    if (nctype > 0) then
+      file_name = build_rank_filename(dir_stage, 'obsgrd_hori_loc', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, hori_loc_ctype(1:nctype))
+      file_name = build_rank_filename(dir_stage, 'obsgrd_vert_loc', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, vert_loc_ctype(1:nctype))
+    end if
+  END SUBROUTINE write_obsgrd_summary
+
+  SUBROUTINE write_obsgrd_meta(ctype_dir, ictype, domain_tag, ensemble_tag)
+    character(len=*), intent(in) :: ctype_dir
+    integer, intent(in) :: ictype
+    character(len=*), intent(in) :: domain_tag
+    character(len=*), intent(in) :: ensemble_tag
+
+    character(len=filelenmax) :: meta_file
+    integer :: unit
+
+    meta_file = trim(ctype_dir)//'/obsgrd_meta_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
+    open(newunit=unit, file=trim(meta_file), status='replace', action='write')
+    write(unit,'(A,I0)') 'ctype=', ictype
+    write(unit,'(A,I0)') 'ngrd_i=', obsgrd(ictype)%ngrd_i
+    write(unit,'(A,I0)') 'ngrd_j=', obsgrd(ictype)%ngrd_j
+    write(unit,'(A,I0)') 'ngrdsch_i=', obsgrd(ictype)%ngrdsch_i
+    write(unit,'(A,I0)') 'ngrdsch_j=', obsgrd(ictype)%ngrdsch_j
+    write(unit,'(A,I0)') 'ngrdext_i=', obsgrd(ictype)%ngrdext_i
+    write(unit,'(A,I0)') 'ngrdext_j=', obsgrd(ictype)%ngrdext_j
+    write(unit,'(A,F24.10)') 'grdspc_i=', obsgrd(ictype)%grdspc_i
+    write(unit,'(A,F24.10)') 'grdspc_j=', obsgrd(ictype)%grdspc_j
+    write(unit,'(A,I0)') 'tot_ext=', obsgrd(ictype)%tot_ext
+    close(unit)
+  END SUBROUTINE write_obsgrd_meta
+
+  SUBROUTINE dump_obsgrd_arrays(ctype_dir, ictype, domain_tag, ensemble_tag)
+    character(len=*), intent(in) :: ctype_dir
+    integer, intent(in) :: ictype
+    character(len=*), intent(in) :: domain_tag
+    character(len=*), intent(in) :: ensemble_tag
+
+    character(len=filelenmax) :: file_name
+    character(len=16) :: base_tag
+
+    write(base_tag,'("type",I4.4)') ictype
+
+    if (allocated(obsgrd(ictype)%n)) then
+      file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_n', domain_tag, ensemble_tag)
+      call write_integer3d(file_name, obsgrd(ictype)%n)
+    end if
+    if (allocated(obsgrd(ictype)%ac)) then
+      file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_ac', domain_tag, ensemble_tag)
+      call write_integer3d(file_name, obsgrd(ictype)%ac)
+    end if
+    if (allocated(obsgrd(ictype)%tot)) then
+      file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_tot', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obsgrd(ictype)%tot)
+    end if
+    if (allocated(obsgrd(ictype)%n_ext)) then
+      file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_n_ext', domain_tag, ensemble_tag)
+      call write_integer2d(file_name, obsgrd(ictype)%n_ext)
+    end if
+    if (allocated(obsgrd(ictype)%ac_ext)) then
+      file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_ac_ext', domain_tag, ensemble_tag)
+      call write_integer2d(file_name, obsgrd(ictype)%ac_ext)
+    end if
+    file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_tot_sub', domain_tag, ensemble_tag)
+    call write_integer_vector(file_name, obsgrd(ictype)%tot_sub)
+    file_name = build_rank_filename(ctype_dir, trim(base_tag)//'_tot_g', domain_tag, ensemble_tag)
+    call write_integer_vector(file_name, obsgrd(ictype)%tot_g)
+  END SUBROUTINE dump_obsgrd_arrays
+
   FUNCTION obsda_component_filename(dir_stage, component_name, domain_tag, ensemble_tag) RESULT(path)
     character(len=*), intent(in) :: dir_stage
     character(len=*), intent(in) :: component_name
@@ -229,6 +466,38 @@ CONTAINS
     if (size(data,1) > 0) write(unit) data
     close(unit)
   END SUBROUTINE write_real_vector
+
+  SUBROUTINE write_integer2d(filename, data)
+    character(len=*), intent(in) :: filename
+    integer, intent(in) :: data(:,:)
+    integer(int32) :: nd, dims(2)
+    integer :: unit
+
+    nd = 2_int32
+    dims = int((/size(data,1), size(data,2)/), int32)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    write(unit) nd
+    write(unit) dims
+    if (size(data,1) > 0 .and. size(data,2) > 0) write(unit) data
+    close(unit)
+  END SUBROUTINE write_integer2d
+
+  SUBROUTINE write_integer3d(filename, data)
+    character(len=*), intent(in) :: filename
+    integer, intent(in) :: data(:,:,:)
+    integer(int32) :: nd, dims(3)
+    integer :: unit
+
+    nd = 3_int32
+    dims = int((/size(data,1), size(data,2), size(data,3)/), int32)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    write(unit) nd
+    write(unit) dims
+    if (size(data,1) > 0 .and. size(data,2) > 0 .and. size(data,3) > 0) write(unit) data
+    close(unit)
+  END SUBROUTINE write_integer3d
 
   SUBROUTINE write_real_matrix(filename, data)
     character(len=*), intent(in) :: filename
