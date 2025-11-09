@@ -6,27 +6,39 @@ MODULE letkf_dump
   use common_mpi
   use common_mpi_scale
   use common_scale, only: nlon, nlat, nlev
-  use common_obs_scale, only: obs_da_value_allocate, read_obs_da, write_obs_da, obsda_sort
-  use letkf_obs, only: obsda, nobs_extern
+  use common_obs_scale, only: obs_da_value, obsda_sort
+  use letkf_obs, only: obsda
   implicit none
   private
 
   character(len=*), parameter :: dump_suffix_ext = '.bin'
-  character(len=*), parameter :: obsda_dir_name = 'obsda'
   character(len=*), parameter :: metadata_ext = '.txt'
+  character(len=*), parameter :: obs_stage_after_obsope = 'obsda_after_obsope'
+  character(len=*), parameter :: obs_stage_after_set = 'obsda_after_set_letkf'
 
-  public :: dump_letkf_obs_state
+  public :: dump_letkf_obs_after_obsope
+  public :: dump_letkf_obs_after_set
   public :: dump_letkf_gues_state
   public :: dump_letkf_analysis_state
-  public :: load_letkf_obs_state
 
 CONTAINS
 
-  SUBROUTINE dump_letkf_obs_state()
+  SUBROUTINE dump_letkf_obs_after_obsope()
+    call dump_obsda_stage(obs_stage_after_obsope, obsda)
+  END SUBROUTINE dump_letkf_obs_after_obsope
+
+  SUBROUTINE dump_letkf_obs_after_set()
+    call dump_obsda_stage(obs_stage_after_set, obsda_sort)
+  END SUBROUTINE dump_letkf_obs_after_set
+
+  SUBROUTINE dump_obsda_stage(stage_tag, obs_data)
+    character(len=*), intent(in) :: stage_tag
+    type(obs_da_value), intent(in) :: obs_data
+
     if (.not. LETKF_INPUT_DUMP) return
-    if (.not. allocated(obsda_sort%set)) return
-    call export_obsda_dump(trim_dir(LETKF_INPUT_DUMP_DIR))
-  END SUBROUTINE dump_letkf_obs_state
+    if (.not. allocated(obs_data%set)) return
+    call export_obsda_dump(trim_dir(LETKF_INPUT_DUMP_DIR), stage_tag, obs_data)
+  END SUBROUTINE dump_obsda_stage
 
   SUBROUTINE dump_letkf_gues_state(gues3d, gues2d)
     real(r_size), intent(in) :: gues3d(nij1,nlev,nens,nv3d)
@@ -48,12 +60,6 @@ CONTAINS
     call export_state_dump(trim_dir(LETKF_INPUT_DUMP_DIR), use_prefix, anal3d, anal2d)
   END SUBROUTINE dump_letkf_analysis_state
 
-  SUBROUTINE load_letkf_obs_state(dump_dir)
-    character(len=*), intent(in) :: dump_dir
-
-    call import_obsda_dump(trim_dir(dump_dir))
-  END SUBROUTINE load_letkf_obs_state
-
   SUBROUTINE export_state_dump(base_dir, prefix, state3d, state2d)
     character(len=*), intent(in) :: base_dir
     character(len=*), intent(in) :: prefix
@@ -67,6 +73,8 @@ CONTAINS
     character(len=memflen+3) :: ensemble_tag
     integer :: ierr
     character(len=filelenmax) :: dir_local
+    character(len=filelenmax) :: dir_3d
+    character(len=filelenmax) :: dir_2d
 
     dir_local = base_dir
     call ensure_directory(dir_local)
@@ -76,17 +84,21 @@ CONTAINS
     call write_state_metadata(dir_local, domain_tag, ensemble_tag)
 
     if (nv3d > 0) then
+      dir_3d = append_dir(dir_local, trim(prefix)//'3d')
+      call ensure_directory(dir_3d)
       allocate(v3dr(nij1,nlev,nens,nv3d))
       v3dr = real(state3d, RP)
-      file3d = build_rank_filename(dir_local, trim(prefix)//'3d', domain_tag, ensemble_tag)
+      file3d = build_rank_filename(dir_3d, trim(prefix)//'3d', domain_tag, ensemble_tag)
       call write_real4d(file3d, v3dr)
       deallocate(v3dr)
     end if
 
     if (nv2d > 0) then
+      dir_2d = append_dir(dir_local, trim(prefix)//'2d')
+      call ensure_directory(dir_2d)
       allocate(v2dr(nij1,nens,nv2d))
       v2dr = real(state2d, RP)
-      file2d = build_rank_filename(dir_local, trim(prefix)//'2d', domain_tag, ensemble_tag)
+      file2d = build_rank_filename(dir_2d, trim(prefix)//'2d', domain_tag, ensemble_tag)
       call write_real3d(file2d, v2dr)
       deallocate(v2dr)
     end if
@@ -94,121 +106,146 @@ CONTAINS
     call MPI_Barrier(MPI_COMM_e, ierr)
   END SUBROUTINE export_state_dump
 
-  SUBROUTINE export_obsda_dump(base_dir)
+  SUBROUTINE export_obsda_dump(base_dir, stage_tag, obs_data)
     character(len=*), intent(in) :: base_dir
+    character(len=*), intent(in) :: stage_tag
+    type(obs_da_value), intent(in) :: obs_data
 
-    character(len=filelenmax) :: dir_obsda
-    character(len=filelenmax) :: meta_file, file_name
+    character(len=filelenmax) :: dir_stage
+    character(len=filelenmax) :: file_name
     character(len=8) :: domain_tag
     character(len=memflen+3) :: ensemble_tag
-    character(len=memflen) :: mem_tag
-    integer :: mem, ierr, n_member_dump
+    integer :: ierr
 
-    if (.not. allocated(obsda_sort%set)) return
-
-    dir_obsda = trim(base_dir)//'/'//obsda_dir_name
-    call ensure_directory(dir_obsda)
+    if (.not. allocated(obs_data%set)) return
 
     domain_tag = domain_suffix()
     ensemble_tag = ensemble_suffix()
-    meta_file = trim(dir_obsda)//'/obsda_meta_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
-    call write_obsda_metadata(meta_file)
+    dir_stage = append_dir(base_dir, stage_tag)
+    call ensure_directory(dir_stage)
 
-    file_name = obsda_filename(dir_obsda, memf_mean, domain_tag, ensemble_tag)
-    call write_obs_da(file_name, obsda_sort, 0)
-
-    if (allocated(obsda_sort%ensval)) then
-      n_member_dump = min(MEMBER, size(obsda_sort%ensval, 1))
-    else
-      n_member_dump = 0
+    if (allocated(obs_data%set)) then
+      file_name = obsda_component_filename(dir_stage, 'set', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_data%set)
     end if
 
-    do mem = 1, n_member_dump
-      mem_tag = mem_label(mem)
-      file_name = obsda_filename(dir_obsda, mem_tag, domain_tag, ensemble_tag)
-      call write_obs_da(file_name, obsda_sort, mem)
-    end do
+    if (allocated(obs_data%idx)) then
+      file_name = obsda_component_filename(dir_stage, 'idx', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_data%idx)
+    end if
+
+    if (allocated(obs_data%key)) then
+      file_name = obsda_component_filename(dir_stage, 'key', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_data%key)
+    end if
+
+    if (allocated(obs_data%val)) then
+      file_name = obsda_component_filename(dir_stage, 'val', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_data%val)
+    end if
+
+    if (allocated(obs_data%ensval)) then
+      file_name = obsda_component_filename(dir_stage, 'ensval', domain_tag, ensemble_tag)
+      call write_real_matrix(file_name, obs_data%ensval)
+    end if
+
+    if (allocated(obs_data%epert)) then
+      file_name = obsda_component_filename(dir_stage, 'epert', domain_tag, ensemble_tag)
+      call write_real_matrix(file_name, obs_data%epert)
+    end if
+
+    if (allocated(obs_data%pert)) then
+      file_name = obsda_component_filename(dir_stage, 'pert', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_data%pert)
+    end if
+
+    if (allocated(obs_data%eqv)) then
+      file_name = obsda_component_filename(dir_stage, 'eqv', domain_tag, ensemble_tag)
+      call write_real_matrix(file_name, obs_data%eqv)
+    end if
+
+    if (allocated(obs_data%qv)) then
+      file_name = obsda_component_filename(dir_stage, 'qv', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_data%qv)
+    end if
+
+    if (allocated(obs_data%tm)) then
+      file_name = obsda_component_filename(dir_stage, 'tm', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_data%tm)
+    end if
+
+    if (allocated(obs_data%pm)) then
+      file_name = obsda_component_filename(dir_stage, 'pm', domain_tag, ensemble_tag)
+      call write_real_vector(file_name, obs_data%pm)
+    end if
+
+    if (allocated(obs_data%qc)) then
+      file_name = obsda_component_filename(dir_stage, 'qc', domain_tag, ensemble_tag)
+      call write_integer_vector(file_name, obs_data%qc)
+    end if
 
     call MPI_Barrier(MPI_COMM_d, ierr)
   END SUBROUTINE export_obsda_dump
 
-  SUBROUTINE import_obsda_dump(base_dir)
-    character(len=*), intent(in) :: base_dir
-
-    character(len=filelenmax) :: dir_obsda
-    character(len=filelenmax) :: meta_file, file_name
-    character(len=8) :: domain_tag
-    character(len=memflen+3) :: ensemble_tag
-    character(len=memflen) :: mem_tag
-    integer :: mem, nobs_local_file, nobs_extern_file
-
-    dir_obsda = trim(base_dir)//'/'//obsda_dir_name
-    domain_tag = domain_suffix()
-    ensemble_tag = ensemble_suffix()
-    meta_file = trim(dir_obsda)//'/obsda_meta_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
-    call read_obsda_metadata(meta_file, nobs_local_file, nobs_extern_file)
-
-    obsda%nobs = nobs_local_file
-    call obs_da_value_allocate(obsda, MEMBER)
-    nobs_extern = nobs_extern_file
-
-    file_name = obsda_filename(dir_obsda, memf_mean, domain_tag, ensemble_tag)
-    call read_obs_da(file_name, obsda, 0)
-
-    do mem = 1, MEMBER
-      mem_tag = mem_label(mem)
-      file_name = obsda_filename(dir_obsda, mem_tag, domain_tag, ensemble_tag)
-      call read_obs_da(file_name, obsda, mem)
-    end do
-  END SUBROUTINE import_obsda_dump
-
-  SUBROUTINE write_obsda_metadata(filename)
-    character(len=*), intent(in) :: filename
-    integer :: unit
-
-    open(newunit=unit, file=trim(filename), status='replace', action='write')
-    write(unit,'(A,I0)') 'nobs=', obsda_sort%nobs
-    write(unit,'(A,I0)') 'nobs_extern=', nobs_extern
-    write(unit,'(A,I0)') 'member_count=', MEMBER
-    close(unit)
-  END SUBROUTINE write_obsda_metadata
-
-  SUBROUTINE read_obsda_metadata(filename, nobs_local_file, nobs_extern_file)
-    character(len=*), intent(in) :: filename
-    integer, intent(out) :: nobs_local_file
-    integer, intent(out) :: nobs_extern_file
-
-    character(len=256) :: line
-    integer :: unit, eqpos, ios
-
-    nobs_local_file = 0
-    nobs_extern_file = 0
-
-    open(newunit=unit, file=trim(filename), status='old', action='read')
-    do
-      read(unit,'(A)', iostat=ios) line
-      if (ios /= 0) exit
-      eqpos = index(line, '=')
-      if (eqpos <= 0) cycle
-      select case (adjustl(line(1:eqpos-1)))
-      case ('nobs')
-        read(line(eqpos+1:),*) nobs_local_file
-      case ('nobs_extern')
-        read(line(eqpos+1:),*) nobs_extern_file
-      end select
-    end do
-    close(unit)
-  END SUBROUTINE read_obsda_metadata
-
-  FUNCTION obsda_filename(dir_obsda, mem_tag, domain_tag, ensemble_tag) RESULT(path)
-    character(len=*), intent(in) :: dir_obsda
-    character(len=*), intent(in) :: mem_tag
+  FUNCTION obsda_component_filename(dir_stage, component_name, domain_tag, ensemble_tag) RESULT(path)
+    character(len=*), intent(in) :: dir_stage
+    character(len=*), intent(in) :: component_name
     character(len=*), intent(in) :: domain_tag
     character(len=*), intent(in) :: ensemble_tag
     character(len=filelenmax) :: path
 
-    path = trim(dir_obsda)//'/obsda_'//trim(mem_tag)//'_'//trim(domain_tag)//'.'//trim(ensemble_tag)//'.dat'
-  END FUNCTION obsda_filename
+    path = trim(dir_stage)//'/obsda_'//trim(adjustl(component_name))//'_'// &
+      trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext
+  END FUNCTION obsda_component_filename
+
+  SUBROUTINE write_integer_vector(filename, data)
+    character(len=*), intent(in) :: filename
+    integer, intent(in) :: data(:)
+    integer(int32) :: nd, dims(1)
+    integer :: unit
+
+    nd = 1_int32
+    dims(1) = int(size(data,1), int32)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    write(unit) nd
+    write(unit) dims
+    if (size(data,1) > 0) write(unit) data
+    close(unit)
+  END SUBROUTINE write_integer_vector
+
+  SUBROUTINE write_real_vector(filename, data)
+    character(len=*), intent(in) :: filename
+    real(r_size), intent(in) :: data(:)
+    integer(int32) :: nd, dims(1)
+    integer :: unit
+
+    nd = 1_int32
+    dims(1) = int(size(data,1), int32)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    write(unit) nd
+    write(unit) dims
+    if (size(data,1) > 0) write(unit) data
+    close(unit)
+  END SUBROUTINE write_real_vector
+
+  SUBROUTINE write_real_matrix(filename, data)
+    character(len=*), intent(in) :: filename
+    real(r_size), intent(in) :: data(:,:)
+    integer(int32) :: nd, dims(2)
+    integer :: unit
+
+    nd = 2_int32
+    dims = int((/size(data,1), size(data,2)/), int32)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    write(unit) nd
+    write(unit) dims
+    if (size(data,1) > 0 .and. size(data,2) > 0) write(unit) data
+    close(unit)
+  END SUBROUTINE write_real_matrix
+
 
   SUBROUTINE write_real4d(filename, data)
     character(len=*), intent(in) :: filename
@@ -392,5 +429,12 @@ CONTAINS
     dir_out = adjustl(dir_in)
     if (len_trim(dir_out) == 0) dir_out = 'letkf_dump'
   END FUNCTION trim_dir
+
+  FUNCTION append_dir(parent, child) RESULT(path)
+    character(len=*), intent(in) :: parent
+    character(len=*), intent(in) :: child
+    character(len=filelenmax) :: path
+    path = trim(parent)//'/'//trim(child)
+  END FUNCTION append_dir
 
 END MODULE letkf_dump

@@ -114,13 +114,14 @@ PROGRAM letkf
     call obsope_cal(obsda_return=obsda, nobs_extern=nobs_extern)
 
     call mpi_timer('OBS_OPERATOR', 1, barrier=MPI_COMM_a)
+    call dump_letkf_obs_after_obsope
 
 !-----------------------------------------------------------------------
 ! Process observation data
 !-----------------------------------------------------------------------
 
     call set_letkf_obs
-    call dump_letkf_obs_state
+    call dump_letkf_obs_after_set
 
     call mpi_timer('PROCESS_OBS', 1, barrier=MPI_COMM_a)
 
