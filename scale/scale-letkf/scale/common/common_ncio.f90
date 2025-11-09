@@ -9,6 +9,7 @@ module common_ncio
 !
 !=======================================================================
   use netcdf
+  use iso_fortran_env, only: error_unit
   use common, only: r_size, r_dble, r_sngl
 
   implicit none
@@ -54,8 +55,13 @@ subroutine ncio_open(filename, mode, ncid)
   character(len=*), intent(in) :: filename
   integer, intent(in) :: mode
   integer, intent(out) :: ncid
+  integer :: status
 
-  call ncio_check(nf90_open(filename, mode, ncid))
+  status = nf90_open(filename, mode, ncid)
+  if (status /= nf90_noerr) then
+    write(error_unit,'(A,1X,A)') 'ncio_open: failed to access', trim(filename)
+  end if
+  call ncio_check(status)
 end subroutine ncio_open
 !-----------------------------------------------------------------------
 ! Close a netcdf file
