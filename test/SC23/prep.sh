@@ -51,7 +51,9 @@ for mem in mean $(seq -f %04g 1 $MEMBER) ;do
   mkdir -p $TOPDIR/result/SC23/20210730060000/anal/$mem
   mkdir -p $TOPDIR/result/SC23/20210730060000/bdy/$mem
   mkdir -p $TOPDIR/result/SC23/20210730060030/anal/$mem
+  mkdir -p $TOPDIR/result/SC23/20210730060030/anal_letkf/$mem
 done
+mkdir -p $TOPDIR/result/SC23/20210730060030/anal_letkf/sprd
 
 if [ $RUN_PP == 1 ]; then
 mem=0001
