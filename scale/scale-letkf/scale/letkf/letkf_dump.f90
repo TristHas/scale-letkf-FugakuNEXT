@@ -16,7 +16,7 @@ MODULE letkf_dump
   character(len=*), parameter :: obs_stage_after_obsope = 'obsda_after_obsope'
   character(len=*), parameter :: obs_stage_after_set = 'obsda_after_set_letkf'
   character(len=*), parameter :: das_stage_root = 'das_letkf'
-  integer, parameter :: das_dump_rank = 0
+  integer, parameter :: das_dump_rank = -1
   integer(int64), parameter :: das_dump_max_calls = 2000_int64
 
   character(len=filelenmax), save :: das_base_dir = ''
@@ -1123,11 +1123,13 @@ CONTAINS
     character(len=*), intent(in) :: dir_path
     integer :: ierr_local
     logical :: exists
+    logical :: am_owner
 
     inquire(file=trim(dir_path), exist=exists)
     if (exists) return
 
-    if (myrank == das_dump_rank) then
+    am_owner = (das_dump_rank < 0) .or. (myrank == das_dump_rank)
+    if (am_owner) then
       call execute_command_line('mkdir -p ' // trim(dir_path), exitstat=ierr_local)
       if (ierr_local /= 0) then
         write(error_unit,'(A,1X,A)') 'letkf_dump: failed to create directory', trim(dir_path)
@@ -1234,7 +1236,13 @@ CONTAINS
   END SUBROUTINE append_meta_logical
 
   LOGICAL FUNCTION das_dump_enabled()
-    das_dump_enabled = LETKF_INPUT_DUMP .and. (myrank == das_dump_rank)
+    if (.not. LETKF_INPUT_DUMP) then
+      das_dump_enabled = .false.
+    else if (das_dump_rank < 0) then
+      das_dump_enabled = .true.
+    else
+      das_dump_enabled = (myrank == das_dump_rank)
+    end if
   END FUNCTION das_dump_enabled
 
   LOGICAL FUNCTION das_dump_ready()
@@ -1256,7 +1264,11 @@ CONTAINS
     if (.not. das_dump_enabled()) return
     if (das_base_ready) return
     root_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), das_stage_root)
-    call ensure_directory_local(root_dir)
+    if (das_dump_rank < 0) then
+      call ensure_directory(root_dir)
+    else
+      call ensure_directory_local(root_dir)
+    end if
     das_base_dir = root_dir
     das_base_ready = .true.
     if (.not. das_dump_banner_printed .and. myrank == das_dump_rank) then
