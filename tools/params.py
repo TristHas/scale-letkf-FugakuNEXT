@@ -21,6 +21,7 @@ LETKF_CONSTANTS = {
   "RELAX_SPREAD_OUT": False,
   "dist_zero_fac": 3.651483717,
   "Q_UPDATE_TOP": 30000.0,
+  "Q_SPRD_MAX": 0.5,
   # DET_RUN is false, so no deterministic member is formed.
   "mmdet": None,
   "mmdetin": None,
