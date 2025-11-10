@@ -63,10 +63,8 @@ def _read_binary_array(path: Path, dtype: str) -> np.ndarray:
         data = data[:size]
     return data.reshape(dims, order="F")
 
-
 def _read_state(path: Path) -> np.ndarray:
     return _read_binary_array(path, ">f8")
-
 
 def _read_obs_component(path: Path) -> np.ndarray:
     base = path.name.split("_pe", 1)[0]
@@ -74,18 +72,6 @@ def _read_obs_component(path: Path) -> np.ndarray:
     int_components = {"set", "idx", "key", "qc"}
     dtype = ">i4" if component in int_components else ">f8"
     return _read_binary_array(path, dtype)
-
-
-def _parse_meta(path: Path) -> dict[str, int]:
-    out: dict[str, int] = {}
-    with path.open() as fh:
-        for line in fh:
-            if "=" not in line:
-                continue
-            key, value = line.strip().split("=", 1)
-            if key in {"nlon", "nlat"}:
-                out[key] = int(value)
-    return out
 
 def load_rank_members(
     dump_dir: str | Path,
@@ -130,22 +116,17 @@ def load_and_convert_rank_members(dump_dir, prefix, pe_tag):
         das.append(da_comp.expand_dims(ens=[member]))
     return xr.concat(das, dim="ens").transpose("y", "x", "z", "ens", "variable")
 
-
 def load_obsda_var(dump_dir: str | Path, pe_tag: str | int, member: str | int, variable: str) -> np.ndarray:
     return _load_obsda_var_from_stage(dump_dir, "obsda_after_obsope", pe_tag, member, variable)
-
 
 def load_obsda_sorted_var(dump_dir: str | Path, pe_tag: str | int, member: str | int, variable: str) -> np.ndarray:
     return _load_obsda_var_from_stage(dump_dir, "obsda_after_set_letkf", pe_tag, member, variable)
 
-
 def load_obsda(dump_dir: str | Path, pe_tag: str | int) -> xr.Dataset:
     return _load_obsda_dataset(dump_dir, "obsda_after_obsope", pe_tag)
 
-
 def load_obsda_sorted(dump_dir: str | Path, pe_tag: str | int) -> xr.Dataset:
     return _load_obsda_dataset(dump_dir, "obsda_after_set_letkf", pe_tag)
-
 
 def load_obs_raw(
     dump_dir: str | Path,
@@ -194,7 +175,6 @@ def load_obs_raw(
         raise FileNotFoundError(f"No observation dumps found under {base_dir}")
     return records
 
-
 def load_obsgrd(
     dump_dir: str | Path,
     pe_tag: str | int,
@@ -225,7 +205,6 @@ def load_obsgrd(
         ctypes.append({"ctype": ictype, "meta": meta, "arrays": arrays})
     return {"summary": summary, "ctypes": ctypes}
 
-
 def _load_obsda_var_from_stage(
     dump_dir: str | Path,
     stage_name: str,
@@ -245,7 +224,6 @@ def _load_obsda_var_from_stage(
     if not path.exists():
         raise FileNotFoundError(f"{path} not found")
     return _read_obs_component(path)
-
 
 def _load_obsda_dataset(dump_dir: str | Path, stage_name: str, pe_tag: str | int) -> xr.Dataset:
     stage_dir, legacy_prefix = _resolve_obs_stage_dir(Path(dump_dir), stage_name)
@@ -270,7 +248,6 @@ def _load_obsda_dataset(dump_dir: str | Path, stage_name: str, pe_tag: str | int
         coords = _obs_coords(first.shape, members)
         data_vars[var_name] = xr.DataArray(data, dims=dims, coords=coords)
     return xr.Dataset(data_vars)
-
 
 def _collect_obsda_files(stage_dir: Path, pe_tag: str, legacy_prefix: str | None) -> dict[str, dict[str, Path]]:
     grouped: dict[str, dict[str, Path]] = {}
@@ -297,7 +274,6 @@ def _collect_obsda_files(stage_dir: Path, pe_tag: str, legacy_prefix: str | None
         raise FileNotFoundError(f"No observation files for {pe_tag} under {stage_dir}")
     return grouped
 
-
 def _obs_dims(shape: tuple[int, ...]) -> list[str]:
     dims = ["member"]
     if not shape:
@@ -307,7 +283,6 @@ def _obs_dims(shape: tuple[int, ...]) -> list[str]:
     dims.append("obs")
     return dims
 
-
 def _obs_coords(shape: tuple[int, ...], members: list[str]) -> dict[str, np.ndarray]:
     coords: dict[str, np.ndarray] = {"member": np.array(members)}
     for idx, size in enumerate(shape[:-1]):
@@ -316,13 +291,11 @@ def _obs_coords(shape: tuple[int, ...], members: list[str]) -> dict[str, np.ndar
         coords["obs"] = np.arange(shape[-1])
     return coords
 
-
 def _resolve_state_dir(dump_dir: Path, prefix: str) -> Path:
     candidate = dump_dir / prefix
     if candidate.is_dir():
         return candidate
     return dump_dir
-
 
 def _resolve_obs_stage_dir(dump_dir: Path, stage_name: str) -> tuple[Path, str | None]:
     stage_dir = dump_dir / stage_name
@@ -339,7 +312,6 @@ def _resolve_obs_stage_dir(dump_dir: Path, stage_name: str) -> tuple[Path, str |
         return legacy_root, legacy_token
     return stage_dir, None
 
-
 def _normalize_pe_tag(pe_tag: str | int) -> str:
     if isinstance(pe_tag, int):
         if pe_tag < 0:
@@ -354,7 +326,6 @@ def _normalize_pe_tag(pe_tag: str | int) -> str:
     if tag.isdigit():
         return f"pe{int(tag):06d}"
     raise ValueError(f"Cannot parse pe_tag '{pe_tag}'")
-
 
 def _normalize_member(member: str | int) -> str:
     if isinstance(member, int):
@@ -373,13 +344,11 @@ def _normalize_member(member: str | int) -> str:
         return f"mem{int(tag):04d}"
     raise ValueError(f"Cannot parse member '{member}'")
 
-
 def _extract_obs_index(dirname: str) -> int:
     match = re.match(r"obs(\d{4})", dirname.lower())
     if not match:
         raise ValueError(f"Unrecognized observation directory '{dirname}'")
     return int(match.group(1))
-
 
 def _select_obs_group(
     groups: dict[tuple[str, str], dict[str, Path]],
@@ -396,7 +365,6 @@ def _select_obs_group(
         f"No observation dump matching pe={pe_norm} member={mem_norm}"
     )
 
-
 def _read_text_metadata(path: Path) -> dict[str, int | float | str]:
     if not path.exists():
         return {}
@@ -408,7 +376,6 @@ def _read_text_metadata(path: Path) -> dict[str, int | float | str]:
             key, value = line.strip().split("=", 1)
             meta[key.strip()] = _coerce_value(value.strip())
     return meta
-
 
 def _coerce_value(text: str) -> int | float | str:
     if not text:
