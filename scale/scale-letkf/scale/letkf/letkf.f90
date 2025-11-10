@@ -122,6 +122,7 @@ PROGRAM letkf
 !-----------------------------------------------------------------------
 
     call set_letkf_obs
+    call dump_letkf_obs_nosort_coords
     call dump_letkf_obs_after_set
     call dump_letkf_obsgrd
 

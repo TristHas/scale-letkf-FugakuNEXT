@@ -1,12 +1,12 @@
 MODULE letkf_dump
-  use iso_fortran_env, only: int32, error_unit
+  use iso_fortran_env, only: int32, error_unit, int64
   use scale_precision, only: RP
   use common
   use common_nml
   use common_mpi
   use common_mpi_scale
   use common_scale, only: nlon, nlat, nlev
-  use common_obs_scale, only: obs_da_value, obsda_sort, obs_info, max_obs_info_meta
+  use common_obs_scale, only: obs_da_value, obsda_sort, obs_info, max_obs_info_meta, obs
   use letkf_obs, only: obsda, obsgrd, nctype, hori_loc_ctype, vert_loc_ctype, nobstotal
   implicit none
   private
@@ -15,6 +15,15 @@ MODULE letkf_dump
   character(len=*), parameter :: metadata_ext = '.txt'
   character(len=*), parameter :: obs_stage_after_obsope = 'obsda_after_obsope'
   character(len=*), parameter :: obs_stage_after_set = 'obsda_after_set_letkf'
+  character(len=*), parameter :: das_stage_root = 'das_letkf'
+  integer, parameter :: das_dump_rank = 0
+  integer(int64), parameter :: das_dump_max_calls = 2000_int64
+
+  character(len=filelenmax), save :: das_base_dir = ''
+  logical, save :: das_base_ready = .false.
+  logical, save :: das_dump_banner_printed = .false.
+  integer, parameter :: das_trace_max = 20
+  integer, save :: das_trace_count = 0
 
   public :: dump_letkf_obs_after_obsope
   public :: dump_letkf_obs_after_set
@@ -22,6 +31,15 @@ MODULE letkf_dump
   public :: dump_letkf_analysis_state
   public :: dump_letkf_raw_obs
   public :: dump_letkf_obsgrd
+  public :: dump_letkf_obs_nosort_coords
+  public :: dump_das_obs_local_before
+  public :: dump_das_obs_local_after
+  public :: dump_das_letkf_core_before
+  public :: dump_das_letkf_core_after
+  public :: dump_das_postproc_before
+  public :: dump_das_postproc_after
+  public :: das_dump_enabled
+  public :: prepare_das_dump_base
 
 CONTAINS
 
@@ -126,6 +144,371 @@ CONTAINS
 
     call MPI_Barrier(MPI_COMM_WORLD, ierr)
   END SUBROUTINE dump_letkf_obsgrd
+
+  SUBROUTINE dump_letkf_obs_nosort_coords()
+    integer :: n
+    integer :: set_id, idx_id
+    integer :: nobs_total
+    character(len=filelenmax) :: base_dir
+    character(len=filelenmax) :: stage_dir
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=filelenmax) :: file_path
+    real(r_size), allocatable :: ri_vals(:)
+    real(r_size), allocatable :: rj_vals(:)
+
+    if (.not. LETKF_INPUT_DUMP) return
+    if (.not. allocated(obs)) return
+    if (obsda_sort%nobs <= 0) return
+
+    nobs_total = obsda_sort%nobs
+    allocate(ri_vals(nobs_total))
+    allocate(rj_vals(nobs_total))
+
+    do n = 1, nobs_total
+      set_id = obsda_sort%set(n)
+      idx_id = obsda_sort%idx(n)
+      if (set_id >= 1 .and. set_id <= size(obs)) then
+        if (allocated(obs(set_id)%ri) .and. idx_id >= 1 .and. idx_id <= size(obs(set_id)%ri)) then
+          ri_vals(n) = obs(set_id)%ri(idx_id)
+        else
+          ri_vals(n) = 0.0_r_size
+        end if
+        if (allocated(obs(set_id)%rj) .and. idx_id >= 1 .and. idx_id <= size(obs(set_id)%rj)) then
+          rj_vals(n) = obs(set_id)%rj(idx_id)
+        else
+          rj_vals(n) = 0.0_r_size
+        end if
+      else
+        ri_vals(n) = 0.0_r_size
+        rj_vals(n) = 0.0_r_size
+      end if
+    end do
+
+    base_dir = trim_dir(LETKF_INPUT_DUMP_DIR)
+    stage_dir = append_dir(base_dir, obs_stage_after_set)
+    call ensure_directory(stage_dir)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    file_path = build_rank_filename(stage_dir, 'obsdanosort_ri', domain_tag, ensemble_tag)
+    call write_real_vector(file_path, ri_vals)
+    file_path = build_rank_filename(stage_dir, 'obsdanosort_rj', domain_tag, ensemble_tag)
+    call write_real_vector(file_path, rj_vals)
+
+    deallocate(ri_vals)
+    deallocate(rj_vals)
+  END SUBROUTINE dump_letkf_obs_nosort_coords
+
+  SUBROUTINE dump_das_obs_local_before(call_id, ilev, ij, nvar_global, n2nc, n2n, kind, ri, rj, rlev, rz, search_q0)
+    integer(int64), intent(in) :: call_id
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    character(len=*), intent(in) :: kind
+    real(r_size), intent(in) :: ri, rj, rlev, rz
+    integer, intent(in) :: search_q0(:)
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(20)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('obs_local', 'before', dir_phase)
+    call das_dump_trace('obs_local','before',call_id)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'obs_local')
+    call append_meta(meta_lines, nmeta, 'phase', 'before')
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_real(meta_lines, nmeta, 'ri', ri)
+    call append_meta_real(meta_lines, nmeta, 'rj', rj)
+    call append_meta_real(meta_lines, nmeta, 'rlev', rlev)
+    call append_meta_real(meta_lines, nmeta, 'rz', rz)
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'search_q0', call_id, domain_tag, ensemble_tag)
+    call write_integer_vector(file_path, search_q0)
+  END SUBROUTINE dump_das_obs_local_before
+
+  SUBROUTINE dump_das_obs_local_after(call_id, ilev, ij, nvar_global, n2nc, n2n, kind, nobsl, hdxf, rdiag, rloc, dep, nobsl_t, cutd_t, search_q0)
+    integer(int64), intent(in) :: call_id
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    character(len=*), intent(in) :: kind
+    integer, intent(in) :: nobsl
+    real(r_size), intent(in) :: hdxf(:,:)
+    real(r_size), intent(in) :: rdiag(:)
+    real(r_size), intent(in) :: rloc(:)
+    real(r_size), intent(in) :: dep(:)
+    integer, intent(in) :: nobsl_t(:,:)
+    real(r_size), intent(in) :: cutd_t(:,:)
+    integer, intent(in) :: search_q0(:)
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(24)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('obs_local', 'after', dir_phase)
+    call das_dump_trace('obs_local','after',call_id)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'obs_local')
+    call append_meta(meta_lines, nmeta, 'phase', 'after')
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_int(meta_lines, nmeta, 'nobsl', int(nobsl, int64))
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'hdxf', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix_prefix(file_path, hdxf, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'rdiag', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, rdiag, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'rloc', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, rloc, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'dep', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, dep, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'search_q0', call_id, domain_tag, ensemble_tag)
+    call write_integer_vector(file_path, search_q0)
+    file_path = build_das_rank_filename(dir_phase, 'nobsl_t', call_id, domain_tag, ensemble_tag)
+    call write_integer2d(file_path, nobsl_t)
+    file_path = build_das_rank_filename(dir_phase, 'cutd_t', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix(file_path, cutd_t)
+  END SUBROUTINE dump_das_obs_local_after
+
+  SUBROUTINE dump_das_letkf_core_before(call_id, kind, ilev, ij, nvar_global, n2nc, n2n, nobsl, nobstotal_all, parm_infl, hdxf, rdiag, rloc, dep, rdiag_wloc_flag, infl_update_flag)
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: kind
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    integer, intent(in) :: nobsl, nobstotal_all
+    real(r_size), intent(in) :: parm_infl
+    real(r_size), intent(in) :: hdxf(:,:)
+    real(r_size), intent(in) :: rdiag(:)
+    real(r_size), intent(in) :: rloc(:)
+    real(r_size), intent(in) :: dep(:)
+    logical, intent(in) :: rdiag_wloc_flag
+    logical, intent(in) :: infl_update_flag
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(32)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('letkf_core', 'before', dir_phase)
+    call das_dump_trace('letkf_core','before',call_id)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'letkf_core')
+    call append_meta(meta_lines, nmeta, 'phase', 'before')
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta_int(meta_lines, nmeta, 'nobsl', int(nobsl, int64))
+    call append_meta_int(meta_lines, nmeta, 'nobstotal', int(nobstotal_all, int64))
+    call append_meta_real(meta_lines, nmeta, 'parm_infl', parm_infl)
+    call append_meta_logical(meta_lines, nmeta, 'rdiag_wloc', rdiag_wloc_flag)
+    call append_meta_logical(meta_lines, nmeta, 'infl_update', infl_update_flag)
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'hdxf', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix_prefix(file_path, hdxf, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'rdiag', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, rdiag, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'rloc', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, rloc, nobsl)
+    file_path = build_das_rank_filename(dir_phase, 'dep', call_id, domain_tag, ensemble_tag)
+    call write_real_vector_prefix(file_path, dep, nobsl)
+  END SUBROUTINE dump_das_letkf_core_before
+
+  SUBROUTINE dump_das_letkf_core_after(call_id, kind, ilev, ij, nvar_global, n2nc, n2n, nobsl, parm_infl, trans, transm, pa, parm_updated, transmd)
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: kind
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    integer, intent(in) :: nobsl
+    real(r_size), intent(in) :: parm_infl
+    real(r_size), intent(in) :: trans(:,:)
+    real(r_size), intent(in) :: transm(:)
+    real(r_size), intent(in) :: pa(:,:)
+    real(r_size), intent(in) :: parm_updated
+    real(r_size), intent(in), optional :: transmd(:)
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(28)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('letkf_core', 'after', dir_phase)
+    call das_dump_trace('letkf_core','after',call_id)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'letkf_core')
+    call append_meta(meta_lines, nmeta, 'phase', 'after')
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta_int(meta_lines, nmeta, 'nobsl', int(nobsl, int64))
+    call append_meta_real(meta_lines, nmeta, 'parm_infl_post', parm_infl)
+    call append_meta_real(meta_lines, nmeta, 'parm_updated', parm_updated)
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'trans', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix(file_path, trans)
+    file_path = build_das_rank_filename(dir_phase, 'transm', call_id, domain_tag, ensemble_tag)
+    call write_real_vector(file_path, transm)
+    file_path = build_das_rank_filename(dir_phase, 'pa', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix(file_path, pa)
+    if (present(transmd)) then
+      file_path = build_das_rank_filename(dir_phase, 'transmd', call_id, domain_tag, ensemble_tag)
+      call write_real_vector(file_path, transmd)
+    end if
+  END SUBROUTINE dump_das_letkf_core_after
+
+  SUBROUTINE dump_das_postproc_before(call_id, kind, ilev, ij, nvar_global, n2nc, n2n, beta, parm_val, relax_alpha, relax_alpha_spread, relax_spread_out, relax_to_inflated_prior, det_run, gues_mean, gues_members, trans, transm)
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: kind
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    real(r_size), intent(in) :: beta
+    real(r_size), intent(in) :: parm_val
+    real(r_size), intent(in) :: relax_alpha, relax_alpha_spread
+    logical, intent(in) :: relax_spread_out, relax_to_inflated_prior, det_run
+    real(r_size), intent(in) :: gues_mean
+    real(r_size), intent(in) :: gues_members(:)
+    real(r_size), intent(in) :: trans(:,:)
+    real(r_size), intent(in) :: transm(:)
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(32)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('postproc', 'before', dir_phase)
+    call das_dump_trace('postproc','before',call_id)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'postproc')
+    call append_meta(meta_lines, nmeta, 'phase', 'before')
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta_real(meta_lines, nmeta, 'beta', beta)
+    call append_meta_real(meta_lines, nmeta, 'parm', parm_val)
+    call append_meta_real(meta_lines, nmeta, 'relax_alpha', relax_alpha)
+    call append_meta_real(meta_lines, nmeta, 'relax_alpha_spread', relax_alpha_spread)
+    call append_meta_logical(meta_lines, nmeta, 'relax_spread_out', relax_spread_out)
+    call append_meta_logical(meta_lines, nmeta, 'relax_to_inflated_prior', relax_to_inflated_prior)
+    call append_meta_logical(meta_lines, nmeta, 'det_run', det_run)
+    call append_meta_real(meta_lines, nmeta, 'gues_mean', gues_mean)
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'trans', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix(file_path, trans)
+    file_path = build_das_rank_filename(dir_phase, 'transm', call_id, domain_tag, ensemble_tag)
+    call write_real_vector(file_path, transm)
+    file_path = build_das_rank_filename(dir_phase, 'gues_members', call_id, domain_tag, ensemble_tag)
+    call write_real_vector(file_path, gues_members)
+  END SUBROUTINE dump_das_postproc_before
+
+  SUBROUTINE dump_das_postproc_after(call_id, kind, ilev, ij, nvar_global, n2nc, n2n, beta, transrlx, anal_members, q_mean, q_sprd, q_limited, workda_value, workda_present, anal_det)
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: kind
+    integer, intent(in) :: ilev, ij, nvar_global, n2nc, n2n
+    real(r_size), intent(in) :: beta
+    real(r_size), intent(in) :: transrlx(:,:)
+    real(r_size), intent(in) :: anal_members(:)
+    real(r_size), intent(in) :: q_mean, q_sprd
+    logical, intent(in) :: q_limited
+    real(r_size), intent(in) :: workda_value
+    logical, intent(in) :: workda_present
+    real(r_size), intent(in), optional :: anal_det(:)
+    character(len=filelenmax) :: dir_phase
+    character(len=filelenmax) :: file_path
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=256) :: meta_lines(32)
+    integer :: nmeta
+
+    if (.not. das_dump_allow(call_id)) return
+
+    call get_das_phase_dir('postproc', 'after', dir_phase)
+    call das_dump_trace('postproc','after',call_id)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    nmeta = 0
+    call append_meta(meta_lines, nmeta, 'stage', 'postproc')
+    call append_meta(meta_lines, nmeta, 'phase', 'after')
+    call append_meta(meta_lines, nmeta, 'kind', trim(kind))
+    call append_meta_int(meta_lines, nmeta, 'call_id', call_id)
+    call append_meta_int(meta_lines, nmeta, 'ij', int(ij, int64))
+    call append_meta_int(meta_lines, nmeta, 'ilev', int(ilev, int64))
+    call append_meta_int(meta_lines, nmeta, 'nvar', int(nvar_global, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2nc', int(n2nc, int64))
+    call append_meta_int(meta_lines, nmeta, 'n2n', int(n2n, int64))
+    call append_meta_real(meta_lines, nmeta, 'beta', beta)
+    call append_meta_real(meta_lines, nmeta, 'q_mean', q_mean)
+    call append_meta_real(meta_lines, nmeta, 'q_sprd', q_sprd)
+    call append_meta_logical(meta_lines, nmeta, 'q_limited', q_limited)
+    call append_meta_logical(meta_lines, nmeta, 'workda_present', workda_present)
+    call append_meta_real(meta_lines, nmeta, 'workda_value', workda_value)
+    call write_das_metadata(dir_phase, call_id, meta_lines(1:nmeta))
+
+    file_path = build_das_rank_filename(dir_phase, 'transrlx', call_id, domain_tag, ensemble_tag)
+    call write_real_matrix(file_path, transrlx)
+    file_path = build_das_rank_filename(dir_phase, 'anal_members', call_id, domain_tag, ensemble_tag)
+    call write_real_vector(file_path, anal_members)
+    if (present(anal_det)) then
+      file_path = build_das_rank_filename(dir_phase, 'anal_det', call_id, domain_tag, ensemble_tag)
+      call write_real_vector(file_path, anal_det)
+    end if
+  END SUBROUTINE dump_das_postproc_after
 
   SUBROUTINE export_state_dump(base_dir, prefix, state3d, state2d)
     character(len=*), intent(in) :: base_dir
@@ -548,6 +931,36 @@ CONTAINS
     close(unit)
   END SUBROUTINE write_real3d
 
+  SUBROUTINE write_real_vector_prefix(filename, data, count)
+    character(len=*), intent(in) :: filename
+    real(r_size), intent(in) :: data(:)
+    integer, intent(in) :: count
+    real(r_size), allocatable :: buffer(:)
+    integer :: use_count
+
+    use_count = max(count, 0)
+    allocate(buffer(use_count))
+    if (use_count > 0) buffer = data(1:use_count)
+    call write_real_vector(filename, buffer)
+    deallocate(buffer)
+  END SUBROUTINE write_real_vector_prefix
+
+  SUBROUTINE write_real_matrix_prefix(filename, data, nrow)
+    character(len=*), intent(in) :: filename
+    real(r_size), intent(in) :: data(:,:)
+    integer, intent(in) :: nrow
+    real(r_size), allocatable :: buffer(:,:)
+    integer :: ncol
+    integer :: use_rows
+
+    ncol = size(data,2)
+    use_rows = max(nrow, 0)
+    allocate(buffer(use_rows,ncol))
+    if (use_rows > 0) buffer = data(1:use_rows,:)
+    call write_real_matrix(filename, buffer)
+    deallocate(buffer)
+  END SUBROUTINE write_real_matrix_prefix
+
   FUNCTION mem_label(im) RESULT(tag)
     integer, intent(in) :: im
     character(len=memflen) :: tag
@@ -705,5 +1118,159 @@ CONTAINS
     character(len=filelenmax) :: path
     path = trim(parent)//'/'//trim(child)
   END FUNCTION append_dir
+
+  SUBROUTINE ensure_directory_local(dir_path)
+    character(len=*), intent(in) :: dir_path
+    integer :: ierr_local
+    logical :: exists
+
+    inquire(file=trim(dir_path), exist=exists)
+    if (exists) return
+
+    if (myrank == das_dump_rank) then
+      call execute_command_line('mkdir -p ' // trim(dir_path), exitstat=ierr_local)
+      if (ierr_local /= 0) then
+        write(error_unit,'(A,1X,A)') 'letkf_dump: failed to create directory', trim(dir_path)
+        stop 1
+      end if
+    end if
+  END SUBROUTINE ensure_directory_local
+
+  SUBROUTINE get_das_phase_dir(stage, phase, dir_phase)
+    character(len=*), intent(in) :: stage, phase
+    character(len=filelenmax), intent(out) :: dir_phase
+    character(len=filelenmax) :: stage_dir
+
+    dir_phase = ''
+    if (.not. das_dump_ready()) return
+
+    stage_dir = append_dir(das_base_dir, trim(stage))
+    call ensure_directory_local(stage_dir)
+    dir_phase = append_dir(stage_dir, trim(phase))
+    call ensure_directory_local(dir_phase)
+  END SUBROUTINE get_das_phase_dir
+
+  FUNCTION format_call_tag(call_id) RESULT(tag)
+    integer(int64), intent(in) :: call_id
+    character(len=16) :: tag
+    write(tag,'(I12.12)') call_id
+  END FUNCTION format_call_tag
+
+  SUBROUTINE write_das_metadata(dir_phase, call_id, lines)
+    character(len=*), intent(in) :: dir_phase
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: lines(:)
+    character(len=filelenmax) :: meta_file
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    integer :: unit, i
+    character(len=16) :: call_tag
+
+    if (.not. das_dump_ready()) return
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+    call_tag = format_call_tag(call_id)
+    meta_file = trim(dir_phase)//'/meta_call'//trim(call_tag)//'_'//trim(domain_tag)//'.'//trim(ensemble_tag)//metadata_ext
+    open(newunit=unit, file=trim(meta_file), status='replace', action='write')
+    do i=1,size(lines)
+      if (len_trim(lines(i)) > 0) then
+        write(unit,'(A)') trim(lines(i))
+      end if
+    end do
+    close(unit)
+  END SUBROUTINE write_das_metadata
+
+  FUNCTION build_das_rank_filename(base_dir, prefix, call_id, domain_tag, ensemble_tag) RESULT(path)
+    character(len=*), intent(in) :: base_dir, prefix
+    integer(int64), intent(in) :: call_id
+    character(len=*), intent(in) :: domain_tag, ensemble_tag
+    character(len=filelenmax) :: path
+    character(len=16) :: call_tag
+
+    call_tag = format_call_tag(call_id)
+    path = trim(base_dir)//'/'//trim(prefix)//'_call'//trim(call_tag)//'_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext
+  END FUNCTION build_das_rank_filename
+
+  SUBROUTINE append_meta(meta, count, key, value)
+    character(len=*), intent(inout) :: meta(:)
+    integer, intent(inout) :: count
+    character(len=*), intent(in) :: key, value
+    if (count >= size(meta)) return
+    count = count + 1
+    meta(count) = trim(key)//'='//trim(adjustl(value))
+  END SUBROUTINE append_meta
+
+  SUBROUTINE append_meta_int(meta, count, key, value)
+    character(len=*), intent(inout) :: meta(:)
+    integer, intent(inout) :: count
+    character(len=*), intent(in) :: key
+    integer(int64), intent(in) :: value
+    character(len=64) :: buffer
+    write(buffer,'(I0)') value
+    call append_meta(meta, count, key, trim(buffer))
+  END SUBROUTINE append_meta_int
+
+  SUBROUTINE append_meta_real(meta, count, key, value)
+    character(len=*), intent(inout) :: meta(:)
+    integer, intent(inout) :: count
+    character(len=*), intent(in) :: key
+    real(r_size), intent(in) :: value
+    character(len=64) :: buffer
+    write(buffer,'(ES24.16E3)') value
+    call append_meta(meta, count, key, trim(buffer))
+  END SUBROUTINE append_meta_real
+
+  SUBROUTINE append_meta_logical(meta, count, key, value)
+    character(len=*), intent(inout) :: meta(:)
+    integer, intent(inout) :: count
+    character(len=*), intent(in) :: key
+    logical, intent(in) :: value
+    if (value) then
+      call append_meta(meta, count, key, 'true')
+    else
+      call append_meta(meta, count, key, 'false')
+    end if
+  END SUBROUTINE append_meta_logical
+
+  LOGICAL FUNCTION das_dump_enabled()
+    das_dump_enabled = LETKF_INPUT_DUMP .and. (myrank == das_dump_rank)
+  END FUNCTION das_dump_enabled
+
+  LOGICAL FUNCTION das_dump_ready()
+    das_dump_ready = das_dump_enabled() .and. das_base_ready
+  END FUNCTION das_dump_ready
+
+  LOGICAL FUNCTION das_dump_allow(call_id)
+    integer(int64), intent(in) :: call_id
+    das_dump_allow = .false.
+    if (.not. das_dump_ready()) return
+    if (das_dump_max_calls > 0_int64) then
+      if (call_id > das_dump_max_calls) return
+    end if
+    das_dump_allow = .true.
+  END FUNCTION das_dump_allow
+
+  SUBROUTINE prepare_das_dump_base()
+    character(len=filelenmax) :: root_dir
+    if (.not. das_dump_enabled()) return
+    if (das_base_ready) return
+    root_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), das_stage_root)
+    call ensure_directory_local(root_dir)
+    das_base_dir = root_dir
+    das_base_ready = .true.
+    if (.not. das_dump_banner_printed .and. myrank == das_dump_rank) then
+      write(6,'(A)') '[das_dump] enabled on this rank; output under '//trim(das_base_dir)
+      das_dump_banner_printed = .true.
+    end if
+  END SUBROUTINE prepare_das_dump_base
+
+  SUBROUTINE das_dump_trace(stage, phase, call_id)
+    character(len=*), intent(in) :: stage, phase
+    integer(int64), intent(in) :: call_id
+    if (das_trace_count >= das_trace_max) return
+    das_trace_count = das_trace_count + 1
+    write(6,'(A,I0,A,A,A,A,A,A,I0)') '[das_dump] call ', call_id, ' stage=', trim(stage), ' phase=', trim(phase), ' rank=', myrank
+  END SUBROUTINE das_dump_trace
 
 END MODULE letkf_dump
