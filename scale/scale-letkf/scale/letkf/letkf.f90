@@ -143,6 +143,7 @@ PROGRAM letkf
     allocate (anal2d(nij1,nens,nv2d))
 
     call mpi_timer('SET_GRID', 1, barrier=MPI_COMM_a)
+    call dump_letkf_grid_indices(rig1, rjg1, topo1, hgt1)
 
     !
     ! READ GUES

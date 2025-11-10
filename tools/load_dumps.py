@@ -106,6 +106,32 @@ def load_rank_members(
     da = da.where(da>-10**30)
     return da
 
+def load_grid_info(
+    dump_dir: str | Path,
+    pe_tag: str | int,
+    member: str | int = "mem0001",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load rig1/rjg1/topo1/hgt1 arrays dumped per rank."""
+    dump_dir = Path(dump_dir)
+    base_dir = dump_dir / "grid"
+    if not base_dir.exists():
+        raise FileNotFoundError(f"{base_dir} not found")
+    pe_norm = _normalize_pe_tag(pe_tag)
+    mem_norm = _normalize_member(member)
+    rig1_path = base_dir / f"rig1_{pe_norm}.{mem_norm}.bin"
+    rjg1_path = base_dir / f"rjg1_{pe_norm}.{mem_norm}.bin"
+    if not rig1_path.exists() or not rjg1_path.exists():
+        raise FileNotFoundError(f"rig1/rjg1 files missing for {pe_norm}.{mem_norm}")
+    rig1 = _read_binary_array(rig1_path, ">f8").reshape(-1)
+    rjg1 = _read_binary_array(rjg1_path, ">f8").reshape(-1)
+    topo1 = None
+    hgt1 = None
+    if (base_dir / f"topo1_{pe_norm}.{mem_norm}.bin").exists():
+        topo1 = _read_binary_array(base_dir / f"topo1_{pe_norm}.{mem_norm}.bin", ">f8").reshape(-1)
+    if (base_dir / f"hgt1_{pe_norm}.{mem_norm}.bin").exists():
+        hgt1 = _read_binary_array(base_dir / f"hgt1_{pe_norm}.{mem_norm}.bin", ">f8")
+    return rig1, rjg1, topo1, hgt1
+
 def load_and_convert_rank_members(dump_dir, prefix, pe_tag):
     das = []
     for member in ["0001", "0002", "mean"]:

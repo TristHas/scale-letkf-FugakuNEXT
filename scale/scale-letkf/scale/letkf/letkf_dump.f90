@@ -31,6 +31,7 @@ MODULE letkf_dump
   public :: dump_letkf_analysis_state
   public :: dump_letkf_raw_obs
   public :: dump_letkf_obsgrd
+  public :: dump_letkf_grid_indices
   public :: dump_letkf_obs_nosort_coords
   public :: dump_das_obs_local_before
   public :: dump_das_obs_local_after
@@ -144,6 +145,39 @@ CONTAINS
 
     call MPI_Barrier(MPI_COMM_WORLD, ierr)
   END SUBROUTINE dump_letkf_obsgrd
+
+  SUBROUTINE dump_letkf_grid_indices(rig1, rjg1, topo1, hgt1)
+    real(r_size), intent(in) :: rig1(:)
+    real(r_size), intent(in) :: rjg1(:)
+    real(r_size), intent(in), optional :: topo1(:)
+    real(r_size), intent(in), optional :: hgt1(:,:)
+    character(len=filelenmax) :: base_dir
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+    character(len=filelenmax) :: file_path
+
+    if (.not. LETKF_INPUT_DUMP) return
+
+    base_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), 'grid')
+    call ensure_directory(base_dir)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    file_path = build_rank_filename(base_dir, 'rig1', domain_tag, ensemble_tag)
+    call write_real_vector(file_path, rig1)
+
+    file_path = build_rank_filename(base_dir, 'rjg1', domain_tag, ensemble_tag)
+    call write_real_vector(file_path, rjg1)
+    if (present(topo1)) then
+      file_path = build_rank_filename(base_dir, 'topo1', domain_tag, ensemble_tag)
+      call write_real_vector(file_path, topo1)
+    end if
+    if (present(hgt1)) then
+      file_path = build_rank_filename(base_dir, 'hgt1', domain_tag, ensemble_tag)
+      call write_real_matrix(file_path, hgt1)
+    end if
+  END SUBROUTINE dump_letkf_grid_indices
 
   SUBROUTINE dump_letkf_obs_nosort_coords()
     integer :: n
