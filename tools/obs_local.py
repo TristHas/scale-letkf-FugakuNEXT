@@ -96,10 +96,12 @@ def obs_local(data: ObsLocalInputs) -> Dict[str, np.ndarray]:
 
     ri_obs = data.obs_table.get("ri")
     rj_obs = data.obs_table.get("rj")
-    if ri_obs is None or rj_obs is None:
-        return _fallback_fortran_output(data.after_arrays)
-    if ri_obs.size == 0 or rj_obs.size == 0:
-        return _fallback_fortran_output(data.after_arrays)
+    #if ri_obs is None or rj_obs is None:
+    #    print("fallback 1")
+    #    return _fallback_fortran_output(data.after_arrays)
+    #if ri_obs.size == 0 or rj_obs.size == 0:
+    #    print("fallback 2")
+    #    return _fallback_fortran_output(data.after_arrays)
 
     ri = float(data.before_meta["ri"])
     rj = float(data.before_meta["rj"])
@@ -235,7 +237,11 @@ def _fallback_fortran_output(after_arrays: Mapping[str, np.ndarray]) -> Dict[str
 
 def _load_obs_records(dump_dir: Path, pe_tag: str, member: str) -> Dict[int, Dict[str, np.ndarray]]:
     records: Dict[int, Dict[str, np.ndarray]] = {}
-    for entry in load_obs_raw(dump_dir, pe_tag=pe_tag, member=member):
+    try:
+        entries = load_obs_raw(dump_dir, pe_tag=pe_tag, member=member)
+    except FileNotFoundError:
+        entries = load_obs_raw(dump_dir)
+    for entry in entries:
         arrays = {name: np.asarray(values) for name, values in entry["data"].items()}
         records[int(entry["index"])] = arrays
     if not records:
