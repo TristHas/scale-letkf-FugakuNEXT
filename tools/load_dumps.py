@@ -132,6 +132,34 @@ def load_grid_info(
         hgt1 = _read_binary_array(base_dir / f"hgt1_{pe_norm}.{mem_norm}.bin", ">f8")
     return rig1, rjg1, topo1, hgt1
 
+def load_localization_tables(
+    dump_dir: str | Path,
+    pe_tag: str | int,
+    member: str | int = "mem0001",
+) -> dict[str, np.ndarray]:
+    """Load variable-localization metadata dumped under letkf_dump/localization."""
+    dump_dir = Path(dump_dir)
+    base_dir = dump_dir / "localization"
+    if not base_dir.exists():
+        raise FileNotFoundError(f"{base_dir} not found")
+    pe_norm = _normalize_pe_tag(pe_tag)
+    mem_norm = _normalize_member(member)
+    def _load(name: str, dtype: str):
+        path = base_dir / f"{name}_{pe_norm}.{mem_norm}.bin"
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return _read_binary_array(path, dtype)
+    return {
+        "var_local": _load("var_local", ">f8"),
+        "var_local_n2nc": _load("var_local_n2nc", ">i4"),
+        "var_local_n2n": _load("var_local_n2n", ">i4"),
+        "uid_obs_varlocal": _load("uid_obs_varlocal", ">i4"),
+        "n_merge": _load("n_merge", ">i4"),
+        "ic_merge": _load("ic_merge", ">i4"),
+        "elm_u_ctype": _load("elm_u_ctype", ">i4"),
+        "typ_ctype": _load("typ_ctype", ">i4"),
+    }
+
 def load_and_convert_rank_members(dump_dir, prefix, pe_tag):
     das = []
     for member in ["0001", "0002", "mean"]:

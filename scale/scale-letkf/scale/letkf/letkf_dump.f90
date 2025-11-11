@@ -32,6 +32,7 @@ MODULE letkf_dump
   public :: dump_letkf_raw_obs
   public :: dump_letkf_obsgrd
   public :: dump_letkf_grid_indices
+  public :: dump_letkf_localization_tables
   public :: dump_letkf_obs_nosort_coords
   public :: dump_das_obs_local_before
   public :: dump_das_obs_local_after
@@ -178,6 +179,37 @@ CONTAINS
       call write_real_matrix(file_path, hgt1)
     end if
   END SUBROUTINE dump_letkf_grid_indices
+
+  SUBROUTINE dump_letkf_localization_tables(var_local, var_local_n2nc, var_local_n2n, uid_obs_varlocal, n_merge, ic_merge, elm_u_ctype, typ_ctype)
+    real(r_size), intent(in) :: var_local(:,:)
+    integer, intent(in) :: var_local_n2nc(:)
+    integer, intent(in) :: var_local_n2n(:)
+    integer, intent(in) :: uid_obs_varlocal(:)
+    integer, intent(in) :: n_merge(:)
+    integer, intent(in) :: ic_merge(:,:)
+    integer, intent(in) :: elm_u_ctype(:)
+    integer, intent(in) :: typ_ctype(:)
+    character(len=filelenmax) :: base_dir
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+
+    base_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), 'localization')
+    call ensure_directory(base_dir)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    call write_real_matrix(base_dir//'/'//'var_local_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local)
+    call write_integer_vector(base_dir//'/'//'var_local_n2nc_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2nc)
+    call write_integer_vector(base_dir//'/'//'var_local_n2n_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2n)
+    call write_integer_vector(base_dir//'/'//'uid_obs_varlocal_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, uid_obs_varlocal)
+    call write_integer_vector(base_dir//'/'//'n_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, n_merge)
+    call write_integer_matrix(base_dir//'/'//'ic_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, ic_merge)
+    call write_integer_vector(base_dir//'/'//'elm_u_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, elm_u_ctype)
+    call write_integer_vector(base_dir//'/'//'typ_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, typ_ctype)
+  END SUBROUTINE dump_letkf_localization_tables
 
   SUBROUTINE dump_letkf_obs_nosort_coords()
     integer :: n
@@ -867,6 +899,20 @@ CONTAINS
     if (size(data,1) > 0) write(unit) data
     close(unit)
   END SUBROUTINE write_integer_vector
+
+  SUBROUTINE write_integer_matrix(filename, data)
+    character(len=*), intent(in) :: filename
+    integer, intent(in) :: data(:,:)
+    integer :: unit
+    integer :: dims(2)
+
+    open(newunit=unit, file=trim(filename), form='unformatted', access='stream', status='replace')
+    dims = shape(data)
+    write(unit) 2
+    write(unit) dims
+    write(unit) data
+    close(unit)
+  END SUBROUTINE write_integer_matrix
 
   SUBROUTINE write_real_vector(filename, data)
     character(len=*), intent(in) :: filename

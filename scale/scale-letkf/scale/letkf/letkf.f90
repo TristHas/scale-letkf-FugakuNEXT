@@ -122,6 +122,7 @@ PROGRAM letkf
 !-----------------------------------------------------------------------
 
     call set_letkf_obs
+    call dump_letkf_localization_tables(var_local, var_local_n2nc, var_local_n2n, uid_obs_varlocal, n_merge, ic_merge, elm_u_ctype, typ_ctype)
     call dump_letkf_obs_nosort_coords
     call dump_letkf_obs_after_set
     call dump_letkf_obsgrd
