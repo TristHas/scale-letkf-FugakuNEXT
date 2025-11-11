@@ -4,15 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
 
+from .letkf_core import (
+    LetkfCoreIdentifier,
+    load_letkf_core_from_global,
+    letkf_core,
+)
 from .load_das_letkf import (
     load_das_postproc_after,
     load_das_postproc_before,
 )
-from .params import LETKF_CONSTANTS
+from .load_dumps import _read_binary_array
+from .params import DA_CONSTANTS, GRID_CONSTANTS, LETKF_CONSTANTS
 
 MEMBER = int(LETKF_CONSTANTS["MEMBER"])
 Q_SPRD_MAX = float(LETKF_CONSTANTS.get("Q_SPRD_MAX", 0.0))
@@ -55,6 +61,71 @@ def load_postproc_data(identifier: PostprocIdentifier | Mapping[str, Any]) -> Po
         identifier=ident,
         before_meta=before["meta"],
         before_arrays=before["data"],
+        after_meta=after["meta"],
+        after_arrays=after["data"],
+    )
+
+
+def load_postproc_from_global(identifier: PostprocIdentifier | Mapping[str, Any]) -> PostprocInputs:
+    ident = _normalize_identifier(identifier)
+    core_inputs = load_letkf_core_from_global(
+        LetkfCoreIdentifier(
+            dump_dir=ident.dump_dir,
+            call_id=ident.call_id,
+            pe_tag=ident.pe_tag,
+            member=ident.member,
+        )
+    )
+    core_outputs = letkf_core(core_inputs)
+    meta_core = core_inputs.before_meta
+    ij = int(meta_core["ij"])
+    ilev = int(meta_core["ilev"])
+    nvar = int(meta_core["nvar"])
+    ri = float(meta_core["ri"])
+    rj = float(meta_core["rj"])
+    rz = float(meta_core["rz"])
+    beta = _relax_beta(ri, rj, rz)
+    g_mean, g_pert = _sample_background(
+        ident.dump_dir,
+        ident.pe_tag,
+        ij - 1,
+        ilev - 1,
+        nvar - 1,
+    )
+    before_meta = {
+        "stage": "postproc",
+        "phase": "before",
+        "kind": meta_core["kind"],
+        "call_id": ident.call_id,
+        "ij": ij,
+        "ilev": ilev,
+        "nvar": nvar,
+        "n2nc": int(meta_core["n2nc"]),
+        "n2n": int(meta_core["n2n"]),
+        "beta": beta,
+        "parm": float(core_outputs["parm_infl"]),
+        "relax_alpha": LETKF_CONSTANTS["RELAX_ALPHA"],
+        "relax_alpha_spread": LETKF_CONSTANTS["RELAX_ALPHA_SPREAD"],
+        "relax_spread_out": str(LETKF_CONSTANTS["RELAX_SPREAD_OUT"]).lower(),
+        "relax_to_inflated_prior": str(LETKF_CONSTANTS["RELAX_ALPHA"] > 0.0).lower(),
+        "det_run": str(LETKF_CONSTANTS.get("DET_RUN", False)).lower(),
+        "gues_mean": g_mean,
+    }
+    before_arrays = {
+        "trans": np.asarray(core_outputs["trans"], dtype=np.float64),
+        "transm": np.asarray(core_outputs["transm"], dtype=np.float64),
+        "gues_members": np.asarray(g_pert, dtype=np.float64),
+    }
+    after = load_das_postproc_after(
+        ident.dump_dir,
+        ident.call_id,
+        pe_tag=ident.pe_tag,
+        member=ident.member,
+    )
+    return PostprocInputs(
+        identifier=ident,
+        before_meta=before_meta,
+        before_arrays=before_arrays,
         after_meta=after["meta"],
         after_arrays=after["data"],
     )
@@ -152,6 +223,37 @@ def test_postproc(identifier: PostprocIdentifier | Mapping[str, Any], *, atol: f
     return errors
 
 
+def test_postproc_from_global(
+    identifier: PostprocIdentifier | Mapping[str, Any],
+    *,
+    atol: float = 1.0e-10,
+    rtol: float = 1.0e-10,
+) -> dict[str, float]:
+    data = load_postproc_from_global(identifier)
+    result = postproc(data)
+    errors: dict[str, float] = {}
+
+    for key in ("transrlx", "anal_members"):
+        ref = np.asarray(data.after_arrays[key], dtype=np.float64)
+        np.testing.assert_allclose(result[key], ref, atol=atol, rtol=rtol)
+        errors[key] = float(np.max(np.abs(result[key] - ref)))
+
+    meta_after = data.after_meta
+    np.testing.assert_allclose(float(meta_after.get("beta", 1.0)), data.before_meta["beta"])
+    workda_ref = float(meta_after.get("workda_value", 0.0))
+    np.testing.assert_allclose(result["workda_value"], workda_ref)
+    errors["workda_value"] = abs(result["workda_value"] - workda_ref)
+    errors["q_mean"] = abs(result["q_mean"] - float(meta_after.get("q_mean", 0.0)))
+    errors["q_sprd"] = abs(result["q_sprd"] - float(meta_after.get("q_sprd", 0.0)))
+
+    if _meta_bool(meta_after, "q_limited", False) != result["q_limited"]:
+        raise AssertionError("q_limited mismatch")
+    if _meta_bool(meta_after, "workda_present", False) != result["workda_present"]:
+        raise AssertionError("workda_present mismatch")
+
+    return errors
+
+
 def _apply_relaxation(
     w: np.ndarray,
     trans_raw: np.ndarray,
@@ -202,4 +304,51 @@ def _normalize_identifier(identifier: PostprocIdentifier | Mapping[str, Any]) ->
     return PostprocIdentifier(dump_dir=dump_dir, call_id=int(call_id), pe_tag=str(pe_tag), member=str(member))
 
 
-__all__ = ["PostprocIdentifier", "PostprocInputs", "load_postproc_data", "postproc", "test_postproc"]
+_BACKGROUND_CACHE: Dict[tuple[str, str], np.ndarray] = {}
+
+
+def _load_background_cube(dump_dir: Path, pe_tag: str) -> np.ndarray:
+    key = (str(dump_dir), pe_tag)
+    cached = _BACKGROUND_CACHE.get(key)
+    if cached is not None:
+        return cached
+    path = dump_dir / "gues3d" / f"gues3d_{pe_tag}.mem0001.bin"
+    arr = _read_binary_array(path, ">f8").astype(np.float64, copy=False)
+    members = arr[:, :, :MEMBER, :]
+    _BACKGROUND_CACHE[key] = members
+    return members
+
+
+def _sample_background(
+    dump_dir: Path | str,
+    pe_tag: str,
+    ij_idx: int,
+    ilev_idx: int,
+    nvar_idx: int,
+) -> Tuple[float, np.ndarray]:
+    cube = _load_background_cube(Path(dump_dir), pe_tag)
+    members = cube[ij_idx, ilev_idx, :MEMBER, nvar_idx]
+    mean = float(np.mean(members, dtype=np.float64))
+    perturb = members - mean
+    return mean, perturb
+
+
+def _relax_beta(ri: float, rj: float, rz: float) -> float:
+    radar_only = bool(DA_CONSTANTS.get("RADAR_ONLY", False))
+    if radar_only:
+        zmax = float(DA_CONSTANTS.get("RADAR_ZMAX", 0.0))
+        vert_local = float(DA_CONSTANTS.get("VERT_LOCAL_RADAR", 0.0))
+        if rz > zmax + vert_local * float(LETKF_CONSTANTS["dist_zero_fac"]):
+            return 0.0
+    return 1.0
+
+
+__all__ = [
+    "PostprocIdentifier",
+    "PostprocInputs",
+    "load_postproc_data",
+    "load_postproc_from_global",
+    "postproc",
+    "test_postproc",
+    "test_postproc_from_global",
+]
