@@ -13,6 +13,7 @@ from .letkf_core import (
     load_letkf_core_from_global,
     letkf_core,
 )
+from .obs_local import PRC_NUM_X, PRC_NUM_Y
 from .load_das_letkf import (
     load_das_postproc_after,
     load_das_postproc_before,
@@ -334,13 +335,38 @@ def _sample_background(
 
 
 def _relax_beta(ri: float, rj: float, rz: float) -> float:
+    beta = _boundary_taper(ri, rj)
+    if beta <= 0.0:
+        return 0.0
     radar_only = bool(DA_CONSTANTS.get("RADAR_ONLY", False))
     if radar_only:
         zmax = float(DA_CONSTANTS.get("RADAR_ZMAX", 0.0))
         vert_local = float(DA_CONSTANTS.get("VERT_LOCAL_RADAR", 0.0))
         if rz > zmax + vert_local * float(LETKF_CONSTANTS["dist_zero_fac"]):
             return 0.0
-    return 1.0
+    return beta
+
+
+def _boundary_taper(ri: float, rj: float) -> float:
+    buffer_width = float(DA_CONSTANTS.get("BOUNDARY_BUFFER_WIDTH", 0.0))
+    if buffer_width <= 0.0:
+        return 1.0
+
+    dx = float(GRID_CONSTANTS["DX"])
+    dy = float(GRID_CONSTANTS["DY"])
+    nlon_total = int(GRID_CONSTANTS["nlon"]) * int(PRC_NUM_X)
+    nlat_total = int(GRID_CONSTANTS["nlat"]) * int(PRC_NUM_Y)
+
+    ihalo = int(DA_CONSTANTS.get("IHALO", 0))
+    jhalo = int(DA_CONSTANTS.get("JHALO", 0))
+
+    dist_x = min(max(ri - ihalo, 0.0), max(nlon_total + ihalo + 1 - ri, 0.0)) * dx
+    dist_y = min(max(rj - jhalo, 0.0), max(nlat_total + jhalo + 1 - rj, 0.0)) * dy
+    dist = min(dist_x, dist_y)
+    if dist <= 0.0:
+        return 0.0
+    beta = dist / buffer_width
+    return max(0.0, min(beta, 1.0))
 
 
 __all__ = [
