@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
@@ -26,7 +26,7 @@ from .load_dumps import (
     load_obs_raw,
     load_obsda_sorted,
 )
-from .params import GRID_CONSTANTS, LETKF_CONSTANTS, OBS_ID_CONSTANTS
+from .params import DA_CONSTANTS, GRID_CONSTANTS, LETKF_CONSTANTS, OBS_ID_CONSTANTS
 
 MEMBER = int(LETKF_CONSTANTS["MEMBER"])
 DX = float(GRID_CONSTANTS["DX"])
@@ -41,8 +41,8 @@ VERT_LOCAL_RAIN_BASE = 1000.0
 QUICKSELECT_EPS = np.finfo(np.float64).eps
 PRC_NUM_X = 4
 PRC_NUM_Y = 5
-IHALO = 2
-JHALO = 2
+IHALO = int(DA_CONSTANTS["IHALO"])
+JHALO = int(DA_CONSTANTS["JHALO"])
 N_SEARCH_INCR = 8
 
 
@@ -113,6 +113,7 @@ class ObsLocalInputs:
     ctype_groups: List[CTypeGroup]
     ctype_meta: List[ObsGridInfo]
     before_meta: Dict[str, Any]
+    before_arrays: Dict[str, np.ndarray]
     after_arrays: Dict[str, np.ndarray]
 
 
@@ -152,12 +153,21 @@ def load_obs_local(rank_identifier: ObsLocalIdentifier | Mapping[str, Any]) -> O
         ctype_groups=ctype_groups,
         ctype_meta=ctype_meta,
         before_meta=before_stage["meta"],
+        before_arrays=before_stage["data"],
         after_arrays=after_stage["data"],
     )
 
 
-def obs_local(data: ObsLocalInputs) -> Dict[str, np.ndarray]:
-    """Run a NumPy version of ``obs_local`` for the SC23 configuration."""
+def obs_local(
+    data: ObsLocalInputs,
+    search_q0: np.ndarray | None = None,
+) -> Dict[str, np.ndarray]:
+    """Run a NumPy version of ``obs_local`` for the SC23 configuration.
+
+    If ``search_q0`` is provided, it must be a 1-D array of length ``nctype``
+    representing the incremental-search state for this grid/variable. The
+    array is updated in place following the Fortran logic.
+    """
 
     obs = data.obs
     nobs = obs.count
@@ -171,18 +181,35 @@ def obs_local(data: ObsLocalInputs) -> Dict[str, np.ndarray]:
     selected_rloc: list[float] = []
     rank_coords = _rank_coordinates(data.request.pe_tag)
 
+    if search_q0 is not None:
+        search_vec = np.asarray(search_q0, dtype=np.int64)
+        if search_vec.ndim != 1 or search_vec.shape[0] != len(data.ctype_meta):
+            raise ValueError("search_q0 must be a 1-D array of length nctype")
+    else:
+        search_vec = None
+
     for group in data.ctype_groups:
-        kept = _select_group_observations(
+        q_init = int(search_vec[group.master]) if search_vec is not None else 1
+        kept_indices, q_final, nobsl_incr = _select_group_observations(
             data,
             group,
             dist_tmp,
             rloc_tmp,
             rdiag_tmp,
             rank_coords,
+            q_init,
         )
-        if not kept:
+        if search_vec is not None:
+            if nobsl_incr == 0:
+                pass
+            else:
+                if q_final == q_init and nobsl_incr > MAX_OBS_PER_GRID * 3:
+                    search_vec[group.master] = max(q_final - 1, 1)
+                elif q_final > q_init:
+                    search_vec[group.master] = q_final
+        if not kept_indices:
             continue
-        for iob in kept:
+        for iob in kept_indices:
             selected_hdxf.append(obs.ensval[iob])
             selected_dep.append(float(obs.dep[iob]))
             selected_rdiag.append(float(rdiag_tmp[iob]))
@@ -205,7 +232,11 @@ def test_local_obs(
     """Validate the NumPy ``obs_local`` output against the Fortran dump."""
 
     inputs = load_obs_local(rank_identifier)
-    numpy_output = obs_local(inputs)
+    before_arrays = inputs.before_arrays
+    search_vec = None
+    if before_arrays and "search_q0" in before_arrays:
+        search_vec = np.array(before_arrays["search_q0"], dtype=np.int64, copy=True)
+    numpy_output = obs_local(inputs, search_vec)
     reference = inputs.after_arrays
 
     errors: Dict[str, float] = {}
@@ -218,6 +249,43 @@ def test_local_obs(
         diff = numpy_array - ref_array
         np.testing.assert_allclose(numpy_array, ref_array, rtol=rtol, atol=atol)
         errors[key] = float(np.max(np.abs(diff))) if numpy_array.size else 0.0
+    if search_vec is not None and reference.get("search_q0") is not None:
+        after_search = np.asarray(reference["search_q0"], dtype=np.int64)
+        if not np.array_equal(search_vec, after_search):
+            raise AssertionError("search_q0 mismatch: NumPy vs Fortran dump")
+    return errors
+
+
+def test_local_obs_from_global(
+    rank_identifier: ObsLocalIdentifier | Mapping[str, Any],
+    *,
+    atol: float = 1.0e-10,
+    rtol: float = 1.0e-10,
+) -> Dict[str, float]:
+    """Validate the global-replay loader by comparing to the Fortran dump."""
+
+    inputs = load_obs_local_from_global(rank_identifier)
+    before_arrays = inputs.before_arrays
+    search_vec = None
+    if before_arrays and "search_q0" in before_arrays:
+        search_vec = np.array(before_arrays["search_q0"], dtype=np.int64, copy=True)
+    numpy_output = obs_local(inputs, search_vec)
+    reference = inputs.after_arrays
+
+    errors: Dict[str, float] = {}
+    for key, numpy_array in numpy_output.items():
+        ref_array = reference.get(key)
+        if ref_array is None:
+            continue
+        if numpy_array.shape != ref_array.shape:
+            raise AssertionError(f"{key} shape mismatch: {numpy_array.shape} vs {ref_array.shape}")
+        diff = numpy_array - ref_array
+        np.testing.assert_allclose(numpy_array, ref_array, rtol=rtol, atol=atol)
+        errors[key] = float(np.max(np.abs(diff))) if numpy_array.size else 0.0
+    if search_vec is not None and reference.get("search_q0") is not None:
+        after_search = np.asarray(reference["search_q0"], dtype=np.int64)
+        if not np.array_equal(search_vec, after_search):
+            raise AssertionError("search_q0 mismatch: NumPy vs Fortran dump")
     return errors
 
 
@@ -551,9 +619,10 @@ def _select_group_observations(
     rloc_tmp: np.ndarray,
     rdiag_tmp: np.ndarray,
     rank_coords: tuple[int, int],
-) -> List[int]:
+    search_q0_value: int,
+) -> tuple[List[int], int, int]:
     if not group.ctypes:
-        return []
+        return [], 1, 0
 
     cutoff_bounds = [
         _obs_local_range(data, ctype_idx, rank_coords) for ctype_idx in group.ctypes
@@ -563,7 +632,7 @@ def _select_group_observations(
     nobs_use: List[int] = []
     nobs_use2: List[int] = []
     nn_steps = [0] * (len(group.ctypes) + 1)
-    q = 0
+    q = max(search_q0_value - 1, 0)
 
     while True:
         q += 1
@@ -621,12 +690,14 @@ def _select_group_observations(
         if len(nobs_use2) >= MAX_OBS_PER_GRID or reach_cutoff:
             break
 
+    nobsl_incr = len(nobs_use2)
     if not nobs_use2:
-        return []
-    if len(nobs_use2) > MAX_OBS_PER_GRID:
-        _quickselect_arg(dist_tmp, nobs_use2, MAX_OBS_PER_GRID)
-        return nobs_use2[:MAX_OBS_PER_GRID]
-    return list(nobs_use2)
+        return [], q, nobsl_incr
+    kept = list(nobs_use2)
+    if len(kept) > MAX_OBS_PER_GRID:
+        _quickselect_arg(dist_tmp, kept, MAX_OBS_PER_GRID)
+        kept = kept[:MAX_OBS_PER_GRID]
+    return kept, q, nobsl_incr
 
 
 def _compute_search_increments(data: ObsLocalInputs, group: CTypeGroup) -> List[float]:
@@ -755,4 +826,43 @@ def _normalize_identifier(identifier: ObsLocalIdentifier | Mapping[str, Any]) ->
     )
 
 
-__all__ = ["ObsLocalIdentifier", "ObsLocalInputs", "load_obs_local", "obs_local", "test_local_obs"]
+if TYPE_CHECKING:
+    from .das_replay import ObsLocalReplay
+
+_REPLAY_CACHE: Dict[tuple[str, str, str], "ObsLocalReplay"] = {}
+
+
+def load_obs_local_from_global(rank_identifier: ObsLocalIdentifier | Mapping[str, Any]) -> ObsLocalInputs:
+    """Same as ``load_obs_local`` but derives the 'before' state without das dumps."""
+
+    ident = _normalize_identifier(rank_identifier)
+    replay = _get_replay(ident)
+    inputs = replay.build_inputs_for(ident.call_id, copy_search=True)
+    after_stage = load_das_obs_local_after(
+        ident.dump_dir, ident.call_id, pe_tag=ident.pe_tag, member=ident.member
+    )
+    inputs.after_arrays = after_stage["data"]
+    return inputs
+
+
+def _get_replay(ident: ObsLocalIdentifier) -> "ObsLocalReplay":
+    from .das_replay import ObsLocalReplay
+
+    dump_dir = str(Path(ident.dump_dir))
+    key = (dump_dir, ident.pe_tag, ident.member)
+    replay = _REPLAY_CACHE.get(key)
+    if replay is None:
+        replay = ObsLocalReplay(dump_dir, ident.pe_tag, ident.member)
+        _REPLAY_CACHE[key] = replay
+    return replay
+
+
+__all__ = [
+    "ObsLocalIdentifier",
+    "ObsLocalInputs",
+    "load_obs_local",
+    "load_obs_local_from_global",
+    "obs_local",
+    "test_local_obs",
+    "test_local_obs_from_global",
+]

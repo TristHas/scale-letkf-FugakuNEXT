@@ -43,6 +43,15 @@ OBS_ID_CONSTANTS = {
   "id_radar_ref_obs": 4001,
 }
 
+DA_CONSTANTS = {
+  "IHALO": 2,
+  "JHALO": 2,
+  "BOUNDARY_BUFFER_WIDTH": 1.0e4,
+  "RADAR_ZMAX": 11000.0,
+  "RADAR_ONLY": False,
+  "VERT_LOCAL_RADAR": 2000.0,
+}
+
 def rank_properties(global_rank: int) -> Dict[str, int]:
     """Return per-rank identifiers used inside das_letkf."""
     if not 0 <= global_rank < TOTAL_RANKS:
