@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Dict, Mapping
 
 import numpy as np
 
@@ -13,6 +13,10 @@ from .load_das_letkf import (
     load_das_letkf_core_before,
 )
 
+if TYPE_CHECKING:
+    from .das_replay import ObsLocalReplay
+
+_REPLAY_CACHE: Dict[tuple[str, str, str], "ObsLocalReplay"] = {}
 SIGMA_B = 0.04
 
 
@@ -52,6 +56,55 @@ def load_letkf_core_data(identifier: LetkfCoreIdentifier | Mapping[str, Any]) ->
         identifier=ident,
         before_meta=before["meta"],
         before_arrays=before["data"],
+        after_meta=after["meta"],
+        after_arrays=after["data"],
+    )
+
+
+def load_letkf_core_from_global(
+    identifier: LetkfCoreIdentifier | Mapping[str, Any],
+) -> LetkfCoreInputs:
+    ident = _normalize_identifier(identifier)
+    replay = _get_replay(ident)
+    outputs, meta = replay.run_call(ident.call_id)
+    nobsl = outputs["hdxf"].shape[0]
+    nobstotal = replay.nobstotal
+    before_meta = {
+        "stage": "letkf_core",
+        "phase": "before",
+        "kind": meta.kind,
+        "call_id": meta.call_id,
+        "ij": meta.ij,
+        "ilev": meta.ilev,
+        "nvar": meta.nvar,
+        "n2nc": meta.n2nc,
+        "n2n": meta.n2n,
+        "nobsl": nobsl,
+        "nobstotal": nobstotal,
+        "parm_infl": 1.0,
+        "rdiag_wloc": "true",
+        "infl_update": "false",
+        "ri": meta.ri,
+        "rj": meta.rj,
+        "rlev": meta.rlev,
+        "rz": meta.rz,
+    }
+    before_arrays = {
+        "hdxf": np.asarray(outputs["hdxf"], dtype=np.float64),
+        "rdiag": np.asarray(outputs["rdiag"], dtype=np.float64),
+        "rloc": np.asarray(outputs["rloc"], dtype=np.float64),
+        "dep": np.asarray(outputs["dep"], dtype=np.float64),
+    }
+    after = load_das_letkf_core_after(
+        ident.dump_dir,
+        ident.call_id,
+        pe_tag=ident.pe_tag,
+        member=ident.member,
+    )
+    return LetkfCoreInputs(
+        identifier=ident,
+        before_meta=before_meta,
+        before_arrays=before_arrays,
         after_meta=after["meta"],
         after_arrays=after["data"],
     )
@@ -164,6 +217,37 @@ def test_letkf_core(identifier: LetkfCoreIdentifier | Mapping[str, Any], *, atol
     return errors
 
 
+def test_letkf_core_from_global(
+    identifier: LetkfCoreIdentifier | Mapping[str, Any],
+    *,
+    atol: float = 1.0e-10,
+    rtol: float = 1.0e-10,
+) -> dict[str, float]:
+    data = load_letkf_core_from_global(identifier)
+    result = letkf_core(data)
+    errors: dict[str, float] = {}
+
+    for key in ("trans", "transm", "pa"):
+        ref = data.after_arrays.get(key)
+        if ref is None:
+            continue
+        ref_np = np.asarray(ref, dtype=np.float64)
+        if key == "pa" and np.max(np.abs(ref_np)) < 1.0e-12:
+            continue
+        np.testing.assert_allclose(result[key], ref_np, atol=atol, rtol=rtol)
+        errors[key] = float(np.max(np.abs(result[key] - ref_np)))
+
+    ref_parm = data.after_meta.get("parm_infl_post")
+    if ref_parm is not None:
+        np.testing.assert_allclose(result["parm_infl"], float(ref_parm), atol=atol, rtol=rtol)
+        errors["parm_infl"] = abs(result["parm_infl"] - float(ref_parm))
+
+    if "transmd" in data.after_arrays:
+        errors["transmd"] = float("nan")
+
+    return errors
+
+
 def _compute_transform(eivec: np.ndarray, eival: np.ndarray, ne: int) -> np.ndarray:
     scales = np.sqrt((ne - 1) / eival)
     work = eivec * scales
@@ -202,6 +286,18 @@ def _meta_bool(meta: Mapping[str, Any], key: str, default: bool = False) -> bool
         if token in ("false", ".false.", "0", "no"):
             return False
     return bool(value)
+
+
+def _get_replay(ident: LetkfCoreIdentifier) -> "ObsLocalReplay":
+    dump_dir = str(Path(ident.dump_dir))
+    key = (dump_dir, ident.pe_tag, ident.member)
+    replay = _REPLAY_CACHE.get(key)
+    if replay is None:
+        from .das_replay import ObsLocalReplay
+
+        replay = ObsLocalReplay(dump_dir, ident.pe_tag, ident.member)
+        _REPLAY_CACHE[key] = replay
+    return replay
 
 
 def _normalize_identifier(identifier: LetkfCoreIdentifier | Mapping[str, Any]) -> LetkfCoreIdentifier:
