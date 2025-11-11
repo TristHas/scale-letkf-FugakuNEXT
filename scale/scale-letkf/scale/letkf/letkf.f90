@@ -122,7 +122,6 @@ PROGRAM letkf
 !-----------------------------------------------------------------------
 
     call set_letkf_obs
-    call dump_letkf_localization_tables(var_local, var_local_n2nc, var_local_n2n, uid_obs_varlocal, n_merge, ic_merge, elm_u_ctype, typ_ctype)
     call dump_letkf_obs_nosort_coords
     call dump_letkf_obs_after_set
     call dump_letkf_obsgrd
@@ -157,7 +156,6 @@ PROGRAM letkf
     end if
 
     call mpi_timer('READ_GUES', 1, barrier=MPI_COMM_a)
-    call dump_letkf_gues_state(gues3d, gues2d)
 
     !
     ! WRITE ENS MEAN and SPRD
@@ -167,6 +165,8 @@ PROGRAM letkf
     else
       call write_ensmean(GUES_MEAN_INOUT_BASENAME, gues3d, gues2d, calced=.false.)
     end if
+
+    call dump_letkf_gues_state(gues3d, gues2d)
 
     if (GUES_SPRD_OUT) then
       call write_enssprd(GUES_SPRD_OUT_BASENAME, gues3d, gues2d)

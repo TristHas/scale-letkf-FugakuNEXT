@@ -20,10 +20,11 @@ MODULE letkf_tools
   USE common_scale
   USE common_mpi_scale
   USE common_letkf
+  USE common_obs_scale
 
   USE letkf_obs
   USE efso_tools
-  use letkf_dump, only: dump_das_obs_local_before, dump_das_obs_local_after, &
+  use letkf_dump, only: dump_letkf_localization_tables, dump_das_obs_local_before, dump_das_obs_local_after, &
     dump_das_letkf_core_before, dump_das_letkf_core_after, dump_das_postproc_before, &
     dump_das_postproc_after, das_dump_enabled, prepare_das_dump_base
 
@@ -115,6 +116,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
   logical :: workda_present
   real(r_size) :: workda_value
   real(r_size) :: anal_det_buf(1)
+  integer :: uid_obs_varlocal_table(nid_obs)
 
   call mpi_timer('', 2)
 
@@ -206,6 +208,11 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
     end if ! [ n_merge(ic) > 0 ]
   end do ! [ ic = 1, nctype ]
   n_merge_max = maxval(n_merge)
+
+  do ic = 1, nid_obs
+    uid_obs_varlocal_table(ic) = uid_obs_varlocal(elem_uid(ic))
+  end do
+  call dump_letkf_localization_tables(var_local, var_local_n2nc, var_local_n2n, uid_obs_varlocal_table, n_merge, ic_merge, elm_u_ctype, typ_ctype)
 
   allocate (search_q0(nctype,nv3d+1,nij1,nlev))
   search_q0(:,:,:,:) = 1

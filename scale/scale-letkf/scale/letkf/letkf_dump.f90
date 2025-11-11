@@ -201,14 +201,14 @@ CONTAINS
     domain_tag = domain_suffix()
     ensemble_tag = ensemble_suffix()
 
-    call write_real_matrix(base_dir//'/'//'var_local_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local)
-    call write_integer_vector(base_dir//'/'//'var_local_n2nc_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2nc)
-    call write_integer_vector(base_dir//'/'//'var_local_n2n_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2n)
-    call write_integer_vector(base_dir//'/'//'uid_obs_varlocal_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, uid_obs_varlocal)
-    call write_integer_vector(base_dir//'/'//'n_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, n_merge)
-    call write_integer_matrix(base_dir//'/'//'ic_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, ic_merge)
-    call write_integer_vector(base_dir//'/'//'elm_u_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, elm_u_ctype)
-    call write_integer_vector(base_dir//'/'//'typ_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, typ_ctype)
+    call write_real_matrix(trim(base_dir)//'/'//'var_local_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local)
+    call write_integer_vector(trim(base_dir)//'/'//'var_local_n2nc_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2nc)
+    call write_integer_vector(trim(base_dir)//'/'//'var_local_n2n_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, var_local_n2n)
+    call write_integer_vector(trim(base_dir)//'/'//'uid_obs_varlocal_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, uid_obs_varlocal)
+    call write_integer_vector(trim(base_dir)//'/'//'n_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, n_merge)
+    call write_integer_matrix(trim(base_dir)//'/'//'ic_merge_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, ic_merge)
+    call write_integer_vector(trim(base_dir)//'/'//'elm_u_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, elm_u_ctype)
+    call write_integer_vector(trim(base_dir)//'/'//'typ_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, typ_ctype)
   END SUBROUTINE dump_letkf_localization_tables
 
   SUBROUTINE dump_letkf_obs_nosort_coords()
