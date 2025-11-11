@@ -54,20 +54,24 @@ _STAGE_FIELDS: dict[tuple[str, str], Mapping[str, str]] = {
 def list_das_calls(dump_dir: str | Path) -> list[int]:
     """Return sorted call IDs available under the das_letkf dump tree."""
 
-    base = Path(dump_dir) / "das_letkf"
-    if not base.exists():
-        return []
     calls: set[int] = set()
-    for meta_path in base.glob("*/*/meta_call*.txt"):
-        name = meta_path.name
-        if "meta_call" not in name:
+    seen_root = False
+    for base in _das_root_candidates(dump_dir):
+        if not base.exists():
             continue
-        try:
-            token = name.split("meta_call", 1)[1]
-            token = token.split("_", 1)[0]
-            calls.add(int(token))
-        except (IndexError, ValueError):
-            continue
+        seen_root = True
+        for meta_path in base.glob("*/*/meta_call*.txt"):
+            name = meta_path.name
+            if "meta_call" not in name:
+                continue
+            try:
+                token = name.split("meta_call", 1)[1]
+                token = token.split("_", 1)[0]
+                calls.add(int(token))
+            except (IndexError, ValueError):
+                continue
+    if not seen_root:
+        return []
     return sorted(calls)
 
 
@@ -116,11 +120,16 @@ def load_das_postproc_after(*args, **kwargs) -> dict[str, Any]:
 
 
 def _stage_dir(dump_dir: str | Path, stage: str, phase: str) -> Path:
-    base = Path(dump_dir) / "das_letkf"
-    phase_dir = base / stage / phase
-    if not phase_dir.is_dir():
-        raise FileNotFoundError(phase_dir)
-    return phase_dir
+    fallback: Path | None = None
+    for base in _das_root_candidates(dump_dir):
+        phase_dir = base / stage / phase
+        if fallback is None:
+            fallback = phase_dir
+        if phase_dir.is_dir():
+            return phase_dir
+    if fallback is not None:
+        raise FileNotFoundError(fallback)
+    raise FileNotFoundError(Path(dump_dir) / "das_letkf" / stage / phase)
 
 
 def _read_stage_metadata(phase_dir: Path, call_tag: str, pe_tag: str, member: str) -> dict[str, Any]:
@@ -161,3 +170,16 @@ def _format_call_id(call_id: int | str) -> str:
     if not token.isdigit():
         raise ValueError(f"Cannot parse call_id '{call_id}'")
     return f"{int(token):012d}"
+
+
+def _das_root_candidates(dump_dir: str | Path) -> tuple[Path, ...]:
+    """Return candidate das_letkf roots (parent-first for new layout)."""
+
+    dump_path = Path(dump_dir)
+    parent_root = dump_path.parent / "das_letkf"
+    local_root = dump_path / "das_letkf"
+    candidates: list[Path] = []
+    for candidate in (parent_root, local_root):
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return tuple(candidates)

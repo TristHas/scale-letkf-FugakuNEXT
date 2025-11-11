@@ -224,11 +224,11 @@ def obs_local(
 
 
 def test_local_obs(
-    rank_identifier: ObsLocalIdentifier | Mapping[str, Any],
-    *,
-    atol: float = 1.0e-10,
-    rtol: float = 1.0e-10,
-) -> Dict[str, float]:
+        rank_identifier: ObsLocalIdentifier | Mapping[str, Any],
+        *,
+        atol: float = 1.0e-10,
+        rtol: float = 1.0e-10,
+    ) -> Dict[str, float]:
     """Validate the NumPy ``obs_local`` output against the Fortran dump."""
 
     inputs = load_obs_local(rank_identifier)

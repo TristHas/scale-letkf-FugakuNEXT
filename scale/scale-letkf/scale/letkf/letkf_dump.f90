@@ -16,6 +16,7 @@ MODULE letkf_dump
   character(len=*), parameter :: obs_stage_after_obsope = 'obsda_after_obsope'
   character(len=*), parameter :: obs_stage_after_set = 'obsda_after_set_letkf'
   character(len=*), parameter :: das_stage_root = 'das_letkf'
+  character(len=*), parameter :: state_meta_subdir = 'state_meta'
   integer, parameter :: das_dump_rank = -1
   integer(int64), parameter :: das_dump_max_calls = 2000_int64
 
@@ -591,13 +592,16 @@ CONTAINS
     character(len=filelenmax) :: dir_local
     character(len=filelenmax) :: dir_3d
     character(len=filelenmax) :: dir_2d
+    character(len=filelenmax) :: dir_meta
 
     dir_local = base_dir
     call ensure_directory(dir_local)
+    dir_meta = append_dir(dir_local, state_meta_subdir)
+    call ensure_directory(dir_meta)
 
     domain_tag = domain_suffix()
     ensemble_tag = ensemble_suffix()
-    call write_state_metadata(dir_local, domain_tag, ensemble_tag)
+    call write_state_metadata(dir_meta, domain_tag, ensemble_tag)
 
     if (nv3d > 0) then
       dir_3d = append_dir(dir_local, trim(prefix)//'3d')
@@ -1199,6 +1203,45 @@ CONTAINS
     path = trim(parent)//'/'//trim(child)
   END FUNCTION append_dir
 
+  FUNCTION parent_dir(dir_in) RESULT(dir_out)
+    character(len=*), intent(in) :: dir_in
+    character(len=filelenmax) :: dir_out
+    integer :: last_sep
+    integer :: i
+    integer :: end_pos
+
+    dir_out = adjustl(dir_in)
+    end_pos = len_trim(dir_out)
+
+    if (end_pos <= 0) then
+      dir_out = '.'
+      return
+    end if
+
+    do while (end_pos > 1)
+      if (dir_out(end_pos:end_pos) == '/' .or. dir_out(end_pos:end_pos) == '\') then
+        end_pos = end_pos - 1
+      else
+        exit
+      end if
+    end do
+
+    last_sep = 0
+    do i = 1, end_pos
+      if (dir_out(i:i) == '/' .or. dir_out(i:i) == '\') then
+        last_sep = i
+      end if
+    end do
+
+    if (last_sep <= 0) then
+      dir_out = '.'
+    else if (last_sep == 1 .and. dir_out(1:1) == '/') then
+      dir_out = '/'
+    else
+      dir_out = dir_out(1:last_sep-1)
+    end if
+  END FUNCTION parent_dir
+
   SUBROUTINE ensure_directory_local(dir_path)
     character(len=*), intent(in) :: dir_path
     integer :: ierr_local
@@ -1341,9 +1384,13 @@ CONTAINS
 
   SUBROUTINE prepare_das_dump_base()
     character(len=filelenmax) :: root_dir
+    character(len=filelenmax) :: dump_root
+    character(len=filelenmax) :: dump_parent
     if (.not. das_dump_enabled()) return
     if (das_base_ready) return
-    root_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), das_stage_root)
+    dump_root = trim_dir(LETKF_INPUT_DUMP_DIR)
+    dump_parent = parent_dir(dump_root)
+    root_dir = append_dir(dump_parent, das_stage_root)
     if (das_dump_rank < 0) then
       call ensure_directory(root_dir)
     else

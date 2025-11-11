@@ -50,6 +50,7 @@ _OBSGRD_INT_ARRAYS = {
     "tot_sub": ">i4",
     "tot_g": ">i4",
 }
+STATE_META_SUBDIR = "state_meta"
 
 def _read_binary_array(path: Path, dtype: str) -> np.ndarray:
     with path.open("rb") as fh:
@@ -159,6 +160,25 @@ def load_localization_tables(
         "elm_u_ctype": _load("elm_u_ctype", ">i4"),
         "typ_ctype": _load("typ_ctype", ">i4"),
     }
+
+def load_state_metadata(
+    dump_dir: str | Path,
+    pe_tag: str | int,
+    member: str | int,
+) -> dict[str, int | float | str]:
+    """Load per-rank metadata dumped alongside the state fields."""
+
+    dump_dir = Path(dump_dir)
+    meta_dir = _resolve_state_meta_dir(dump_dir)
+    pe_norm = _normalize_pe_tag(pe_tag)
+    mem_norm = _normalize_member(member)
+    meta_path = meta_dir / f"state_meta_{pe_norm}.{mem_norm}.txt"
+    if not meta_path.exists():
+        raise FileNotFoundError(meta_path)
+    meta = _read_text_metadata(meta_path)
+    if not meta:
+        raise FileNotFoundError(f"{meta_path} is empty")
+    return meta
 
 def load_and_convert_rank_members(dump_dir, prefix, pe_tag):
     das = []
@@ -347,6 +367,12 @@ def _obs_coords(shape: tuple[int, ...], members: list[str]) -> dict[str, np.ndar
 
 def _resolve_state_dir(dump_dir: Path, prefix: str) -> Path:
     candidate = dump_dir / prefix
+    if candidate.is_dir():
+        return candidate
+    return dump_dir
+
+def _resolve_state_meta_dir(dump_dir: Path) -> Path:
+    candidate = dump_dir / STATE_META_SUBDIR
     if candidate.is_dir():
         return candidate
     return dump_dir
