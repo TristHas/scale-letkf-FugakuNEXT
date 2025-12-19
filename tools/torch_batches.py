@@ -27,15 +27,15 @@ MEMBER = int(LETKF_CONSTANTS["MEMBER"])
 class CoreBatchInputs:
     """Padded batch of obs-local outputs consumed by the LETKF core."""
 
-    hdxf: torch.Tensor  # (batch, max_obs, MEMBER)
-    dep: torch.Tensor  # (batch, max_obs)
-    rdiag: torch.Tensor  # (batch, max_obs)
-    rloc: torch.Tensor  # (batch, max_obs)
-    obs_mask: torch.Tensor  # (batch, max_obs) boolean
-    parm_infl: torch.Tensor  # (batch,)
+    hdxf: torch.Tensor        # (batch, max_obs, MEMBER)
+    dep: torch.Tensor         # (batch, max_obs)
+    rdiag: torch.Tensor       # (batch, max_obs)
+    rloc: torch.Tensor        # (batch, max_obs)
+    obs_mask: torch.Tensor    # (batch, max_obs) boolean
+    parm_infl: torch.Tensor   # (batch,)
     rdiag_wloc: torch.Tensor  # (batch,) boolean
-    infl_update: torch.Tensor  # (batch,) boolean
-    call_ids: torch.Tensor  # (batch,) int64 for bookkeeping
+    infl_update: torch.Tensor # (batch,) boolean
+    call_ids: torch.Tensor    # (batch,) int64 for bookkeeping
 
     @property
     def batch_size(self) -> int:
@@ -59,20 +59,19 @@ class CoreBatchOutputs:
 @dataclass
 class PostprocBatchInputs:
     """Inputs required by the relaxation/post-processing step."""
-
-    trans: torch.Tensor  # (batch, MEMBER, MEMBER)
-    transm: torch.Tensor  # (batch, MEMBER)
+    trans: torch.Tensor         # (batch, MEMBER, MEMBER)
+    transm: torch.Tensor        # (batch, MEMBER)
     gues_members: torch.Tensor  # (batch, MEMBER)
-    gues_mean: torch.Tensor  # (batch,)
-    beta: torch.Tensor  # (batch,)
-    parm: torch.Tensor  # (batch,)
-    relax_alpha: torch.Tensor  # (batch,)
+    gues_mean: torch.Tensor     # (batch,)
+    beta: torch.Tensor          # (batch,)
+    parm: torch.Tensor          # (batch,)
+    relax_alpha: torch.Tensor   # (batch,)
     relax_alpha_spread: torch.Tensor  # (batch,)
-    relax_to_inflated: torch.Tensor  # (batch,) boolean
-    relax_spread_out: torch.Tensor  # (batch,) boolean
-    det_run: torch.Tensor  # (batch,) boolean
-    nvar: torch.Tensor  # (batch,) int64
-    call_ids: torch.Tensor  # (batch,) int64
+    relax_to_inflated: torch.Tensor   # (batch,) boolean
+    relax_spread_out: torch.Tensor    # (batch,) boolean
+    det_run: torch.Tensor             # (batch,) boolean
+    nvar: torch.Tensor                # (batch,) int64
+    call_ids: torch.Tensor            # (batch,) int64
 
 
 @dataclass
@@ -80,23 +79,21 @@ class PostprocBatchOutputs:
     """Outputs of the torch post-processing step."""
 
     anal_members: torch.Tensor  # (batch, MEMBER)
-    transrlx: torch.Tensor  # (batch, MEMBER, MEMBER)
-    q_mean: torch.Tensor  # (batch,)
-    q_sprd: torch.Tensor  # (batch,)
-    q_limited: torch.Tensor  # (batch,) boolean
+    transrlx: torch.Tensor      # (batch, MEMBER, MEMBER)
+    q_mean: torch.Tensor        # (batch,)
+    q_sprd: torch.Tensor        # (batch,)
+    q_limited: torch.Tensor     # (batch,) boolean
     workda_value: torch.Tensor  # (batch,)
-    workda_present: torch.Tensor  # (batch,) boolean
+    workda_present: torch.Tensor# (batch,) boolean
 
 
 def _as_float_tensor(array: np.ndarray, *, device: torch.device | None = None) -> torch.Tensor:
     tensor = torch.from_numpy(np.asarray(array, dtype=np.float64))
     return tensor.to(device=device)
 
-
 def _as_bool_tensor(value: Iterable[bool], *, device: torch.device | None = None) -> torch.Tensor:
     tensor = torch.tensor(list(value), dtype=torch.bool)
     return tensor.to(device=device)
-
 
 def build_core_batch_from_inputs(
     inputs: Sequence[LetkfCoreInputs],

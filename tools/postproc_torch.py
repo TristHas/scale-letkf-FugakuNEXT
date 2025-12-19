@@ -1,7 +1,4 @@
-"""Torch implementation of the LETKF post-processing step."""
-
 from __future__ import annotations
-
 import torch
 
 from .postproc import IV3D_Q
@@ -12,16 +9,16 @@ MEMBER = int(LETKF_CONSTANTS["MEMBER"])
 Q_SPRD_MAX = float(LETKF_CONSTANTS.get("Q_SPRD_MAX", 0.0))
 IDENTITY = None  # lazily initialised
 
-
 def _eye(device: torch.device) -> torch.Tensor:
     global IDENTITY
     if IDENTITY is None or IDENTITY.device != device:
         IDENTITY = torch.eye(MEMBER, dtype=torch.float64, device=device)
     return IDENTITY
 
-
 def postproc_torch(batch: PostprocBatchInputs) -> PostprocBatchOutputs:
-    """Vectorised relaxation and member update."""
+    """
+        Vectorised relaxation and member update.
+    """
 
     device = batch.trans.device
     parm = torch.where(batch.relax_to_inflated, batch.parm, torch.ones_like(batch.parm))
@@ -45,8 +42,8 @@ def postproc_torch(batch: PostprocBatchInputs) -> PostprocBatchOutputs:
     ).squeeze(1)
 
     q_mean_raw = anal_members.mean(dim=1)
-    anomalies = anal_members - q_mean_raw.unsqueeze(-1)
-    sprd_num = torch.sum(anomalies * anomalies, dim=1) / max(MEMBER - 1, 1)
+    anomalies  = anal_members - q_mean_raw.unsqueeze(-1)
+    sprd_num   = torch.sum(anomalies * anomalies, dim=1) / max(MEMBER - 1, 1)
     sprd = torch.sqrt(torch.clamp(sprd_num, min=0.0))
     safe_mean = torch.where(q_mean_raw > 0.0, q_mean_raw, torch.ones_like(q_mean_raw))
     sprd_ratio = torch.zeros_like(q_mean_raw)

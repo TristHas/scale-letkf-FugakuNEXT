@@ -1,5 +1,3 @@
-"""Torch-parallel reproduction of ``das_letkf`` for a single PE tile."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

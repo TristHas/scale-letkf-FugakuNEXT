@@ -111,10 +111,10 @@ def load_letkf_core_from_global(
 
 
 def letkf_core(data: LetkfCoreInputs) -> dict[str, np.ndarray | float | None]:
-    hdxf = np.asarray(data.before_arrays["hdxf"], dtype=np.float64)
+    hdxf  = np.asarray(data.before_arrays["hdxf"], dtype=np.float64)
     rdiag = np.asarray(data.before_arrays["rdiag"], dtype=np.float64)
-    rloc = np.asarray(data.before_arrays["rloc"], dtype=np.float64)
-    dep = np.asarray(data.before_arrays["dep"], dtype=np.float64)
+    rloc  = np.asarray(data.before_arrays["rloc"], dtype=np.float64)
+    dep   = np.asarray(data.before_arrays["dep"], dtype=np.float64)
 
     ne = hdxf.shape[1]
     nobsl = int(data.before_meta.get("nobsl", 0))
@@ -148,6 +148,8 @@ def letkf_core(data: LetkfCoreInputs) -> dict[str, np.ndarray | float | None]:
         factors = 1.0 / rdiag_use
     else:
         factors = np.where(rdiag_use != 0.0, rloc_use / rdiag_use, 0.0)
+    
+        
     hdxb_rinv = hdxf_use * factors[:, None]
 
     work1 = hdxb_rinv.T @ hdxf_use

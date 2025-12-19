@@ -93,7 +93,8 @@ def obs_local_torch(
     *,
     device: torch.device | str | None = None,
 ) -> Mapping[str, np.ndarray]:
-    torch_device = torch.device(device) if isinstance(device, str) or device is not None else torch.device("cpu")
+    torch_device = torch.device(device) if isinstance(device, str) \
+    or device is not None else torch.device("cpu")
     ctx = _build_context(inputs, device=torch_device)
     obs = ctx.obs
     nobs = obs.count
@@ -137,10 +138,10 @@ def obs_local_torch(
             selected_rdiag.append(float(rdiag_tmp[iob].cpu().numpy()))
             selected_rloc.append(float(rloc_tmp[iob].cpu().numpy()))
 
-    hdxf = _stack_or_empty(selected_hdxf, (0, inputs.obs.ensval.shape[1]))
-    dep = _stack_or_empty(selected_dep)
+    hdxf  = _stack_or_empty(selected_hdxf, (0, inputs.obs.ensval.shape[1]))
+    dep   = _stack_or_empty(selected_dep)
     rdiag = _stack_or_empty(selected_rdiag)
-    rloc = _stack_or_empty(selected_rloc)
+    rloc  = _stack_or_empty(selected_rloc)
 
     if search_vec is not None and search_q0 is not None:
         search_q0[:] = search_vec.cpu().numpy()

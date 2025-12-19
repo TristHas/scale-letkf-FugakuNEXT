@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from typing import Dict, List
 import numpy as np
 import xarray as xr
 
@@ -51,6 +52,49 @@ _OBSGRD_INT_ARRAYS = {
     "tot_g": ">i4",
 }
 STATE_META_SUBDIR = "state_meta"
+
+def load_and_convert_rank_members(
+    dump_dir: str | Path,
+    prefix: str,
+    pe_tag: str,
+) -> xr.DataArray:
+    """Load all ensemble members for a rank and attach 1-D lon/lat vectors."""
+
+    dump_dir = Path(dump_dir)
+    pe_norm = _normalize_pe_tag(pe_tag)
+    lat_vec: np.ndarray | None = None
+    lon_vec: np.ndarray | None = None
+    members = ["0001", "0002", "mean"]
+    datasets: List[xr.DataArray] = []
+    for member in members:
+        fname = f"init_20210730-060030.000.{pe_norm}.nc"
+        nc_path = dump_dir / ".." / "anal_f" / member / fname
+        ds = xr.open_dataset(nc_path, engine="netcdf4")
+        if lat_vec is None and "lat" in ds and "lon" in ds:
+            lat2d = ds["lat"].astype(np.float64)
+            lon2d = ds["lon"].astype(np.float64)
+            lat_vec = lat2d.mean(dim="x").values
+            lon_vec = lon2d.mean(dim="y").values
+        da_comp = convert_scale_letkf_var(ds)
+        ds.close()
+        datasets.append(da_comp.expand_dims(ens=[member]))
+    stacked = xr.concat(datasets, dim="ens").transpose("y", "x", "z", "ens", "variable")
+    if lat_vec is not None:
+        if lat_vec.shape[0] == stacked.sizes["y"] + 2:
+            lat_vec = lat_vec[1:-1]
+        elif lat_vec.shape[0] == stacked.sizes["y"] + 4:
+            lat_vec = lat_vec[2:-2]
+    if lon_vec is not None:
+        if lon_vec.shape[0] == stacked.sizes["x"] + 2:
+            lon_vec = lon_vec[1:-1]
+        elif lon_vec.shape[0] == stacked.sizes["x"] + 4:
+            lon_vec = lon_vec[2:-2]
+
+    if lat_vec is not None and lat_vec.shape[0] == stacked.sizes["y"]:
+        stacked = stacked.assign_coords(lat=("y", lat_vec))
+    if lon_vec is not None and lon_vec.shape[0] == stacked.sizes["x"]:
+        stacked = stacked.assign_coords(lon=("x", lon_vec))
+    return stacked
 
 def _read_binary_array(path: Path, dtype: str) -> np.ndarray:
     with path.open("rb") as fh:
@@ -179,16 +223,6 @@ def load_state_metadata(
     if not meta:
         raise FileNotFoundError(f"{meta_path} is empty")
     return meta
-
-def load_and_convert_rank_members(dump_dir, prefix, pe_tag):
-    das = []
-    for member in ["0001", "0002", "mean"]:
-        fname = f"init_20210730-060030.000.{pe_tag}.nc"
-        nc_path = dump_dir / ".." / "anal_f" / member / fname
-        ds = xr.open_dataset(nc_path, engine="netcdf4")
-        da_comp = convert_scale_letkf_var(ds)
-        das.append(da_comp.expand_dims(ens=[member]))
-    return xr.concat(das, dim="ens").transpose("y", "x", "z", "ens", "variable")
 
 def load_obsda_var(dump_dir: str | Path, pe_tag: str | int, member: str | int, variable: str) -> np.ndarray:
     return _load_obsda_var_from_stage(dump_dir, "obsda_after_obsope", pe_tag, member, variable)

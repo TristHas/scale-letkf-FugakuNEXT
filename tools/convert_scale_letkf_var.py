@@ -26,10 +26,12 @@ TRACER_CV = xr.DataArray(
 CONTROL_ORDER = ("U", "V", "W", "T", "P", "QV", "QC", "QR", "QI", "QS", "QG")
 
 def halo_width(coord: xr.DataArray) -> tuple[int, int]:
-      """Read SCALE’s halo metadata for a coordinate axis."""
-      halo = coord.attrs.get("halo_local", (0, 0))
-      halo = tuple(int(v) for v in np.atleast_1d(halo))
-      return halo if len(halo) == 2 else (halo[0], 0)
+    """
+      Read SCALE’s halo metadata for a coordinate axis.
+    """
+    halo = coord.attrs.get("halo_local", (0, 0))
+    halo = tuple(int(v) for v in np.atleast_1d(halo))
+    return halo if len(halo) == 2 else (halo[0], 0)
 
 def strip_halo(da: xr.DataArray, halo_map: dict[str, tuple[int, int]]) -> xr.DataArray:
     """Remove the local halo cells from an array."""

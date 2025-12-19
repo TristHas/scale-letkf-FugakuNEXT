@@ -1,7 +1,4 @@
-"""Reproduce the LETKF post-processing step (relaxation and member updates)."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Tuple
