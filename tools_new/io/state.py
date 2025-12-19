@@ -1,11 +1,15 @@
-import math
-import numpy as np
-import xarray as xr
-from pathlib import Path
+from __future__ import annotations
 
-# ---------------------------------------------------------------------
-# Shared constants and utilities
-# ---------------------------------------------------------------------
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, Mapping, Sequence, Tuple
+
+import torch
+from netCDF4 import Dataset as NetCDFDataset
+
+from xtensor import DataTensor, Dataset
+
 RDRY = 287.04
 CPDRY = 1004.64
 CVDry = CPDRY - RDRY
@@ -17,14 +21,10 @@ CVVAP = CPVAP - RVAP
 PRE00 = 100000.0
 FILL = -9.9999e30
 
-TRACER_CV = xr.DataArray(
-    [CVVAP, CVVAP, CVVAP, CVVAP, CVVAP, CVVAP],
-    dims=("species",),
-    coords={"species": ["QV", "QC", "QR", "QI", "QS", "QG"]},
-)
+TRACER_SPECIES = ("QV", "QC", "QR", "QI", "QS", "QG")
+TRACER_CV = torch.tensor([CVVAP, CVVAP, CVVAP, CVVAP, CVVAP, CVVAP], dtype=torch.float64)
 
-CONTROL_ORDER = ("U", "V", "W", "T", "P",
-                 "QV", "QC", "QR", "QI", "QS", "QG")
+CONTROL_ORDER = ("U", "V", "W", "T", "P", "QV", "QC", "QR", "QI", "QS", "QG")
 
 RADIUS = 6_371_220.0
 BASE_LON_DEG = 139.609
@@ -33,336 +33,231 @@ BASE_LON = math.radians(BASE_LON_DEG)
 BASE_LAT = math.radians(BASE_LAT_DEG)
 FACT = math.cos(BASE_LAT)
 
+MEMBERS = ("0001", "0002", "mean")
+COORD_VARS = ("x", "y", "z", "xh", "yh", "zh")
 
-def halo_width(coord):
-    h = coord.attrs.get("halo_local", (0, 0))
-    h = tuple(int(v) for v in np.atleast_1d(h))
-    return h if len(h) == 2 else (h[0], 0)
-
-
-def read_halo(ds):
-    halo = {}
-    for name in ("x", "xh", "y", "yh", "z", "zh"):
-        if name in ds.coords:
-            L, R = halo_width(ds.coords[name])
-            if L or R:
-                halo[name] = (L, R)
-    return halo
-
-
-def strip_halo(da, halo_map):
-    out = da
-    for dim, (L, R) in halo_map.items():
-        if dim in out.dims:
-            out = out.isel({dim: slice(L, None if R == 0 else -R)})
-    return out
+STATE_FIELD_SPECS: Mapping[str, Tuple[str, ...]] = {
+    "DENS": ("z", "y", "x"),
+    "RHOT": ("z", "y", "x"),
+    "MOMX": ("z", "y", "xh"),
+    "MOMY": ("z", "yh", "x"),
+    "MOMZ": ("zh", "y", "x"),
+    "QV": ("z", "y", "x"),
+    "QC": ("z", "y", "x"),
+    "QR": ("z", "y", "x"),
+    "QI": ("z", "y", "x"),
+    "QS": ("z", "y", "x"),
+    "QG": ("z", "y", "x"),
+    "height": ("z", "y", "x"),
+    "lon": ("y", "x"),
+    "lat": ("y", "x"),
+}
 
 
-def deundef(da):
-    return da.where(np.abs(da - FILL) > 1e20)
+def _parse_halo(value: Iterable[int] | int) -> Tuple[int, int]:
+    if isinstance(value, Iterable) and not isinstance(value, (int, float)):
+        vals = tuple(int(v) for v in value)
+    else:
+        vals = (int(value),)
+    if len(vals) == 2:
+        return vals
+    if len(vals) == 1:
+        return (vals[0], 0)
+    return (0, 0)
 
-# ---------------------------------------------------------------------
-# 1. Load each member and concatenate on ens dimension.
-# ---------------------------------------------------------------------
-def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str="anal_f") -> xr.Dataset:
+
+@dataclass
+class RawState:
+    members: Tuple[str, ...]
+    data: Dict[str, torch.Tensor]
+    coords: Dict[str, Tuple[float, ...]]
+    halo_map: Dict[str, Tuple[int, int]]
+    fxg: torch.Tensor
+    fyg: torch.Tensor
+    cxg0: float
+    cyg0: float
+
+
+def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tuple[float, ...]], Dict[str, Tuple[int, int]], torch.Tensor, torch.Tensor, float, float]:
+    arrays: Dict[str, torch.Tensor] = {}
+    coords: Dict[str, Tuple[float, ...]] = {}
+    halos: Dict[str, Tuple[int, int]] = {}
+    fxg = torch.tensor([])
+    fyg = torch.tensor([])
+    cxg0 = 0.0
+    cyg0 = 0.0
+
+    with NetCDFDataset(path) as ds:
+        for name, target_dims in STATE_FIELD_SPECS.items():
+            var = ds.variables[name]
+            data = torch.as_tensor(var[:], dtype=torch.float64)
+            curr_dims = tuple(var.dimensions)
+            if curr_dims != target_dims:
+                perm = [curr_dims.index(dim) for dim in target_dims]
+                data = data.permute(*perm)
+            arrays[name] = data
+        for coord in COORD_VARS:
+            if coord not in ds.variables:
+                continue
+            var = ds.variables[coord]
+            tensor = torch.as_tensor(var[:], dtype=torch.float64)
+            coords[coord] = tuple(float(v) for v in tensor.tolist())
+            halo_attr = var.getncattr("halo_local") if "halo_local" in var.ncattrs() else (0, 0)
+            halos[coord] = _parse_halo(halo_attr)
+        fxg = torch.as_tensor(ds.variables["FXG"][:], dtype=torch.float64)
+        fyg = torch.as_tensor(ds.variables["FYG"][:], dtype=torch.float64)
+        cxg0 = float(torch.as_tensor(ds.variables["CXG"][:], dtype=torch.float64)[0])
+        cyg0 = float(torch.as_tensor(ds.variables["CYG"][:], dtype=torch.float64)[0])
+    return arrays, coords, halos, fxg, fyg, cxg0, cyg0
+
+
+def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f") -> RawState:
     dump_dir = Path(dump_dir)
-    members = ["0001", "0002", "mean"]
-    datasets = []
-
-    for mem in members:
+    stacked: Dict[str, list[torch.Tensor]] = {name: [] for name in STATE_FIELD_SPECS}
+    base_coords: Dict[str, Tuple[float, ...]] | None = None
+    halo_map: Dict[str, Tuple[int, int]] | None = None
+    fxg = fyg = None
+    cxg0 = cyg0 = 0.0
+    for mem in MEMBERS:
         fname = f"init_20210730-060030.000.{pe_tag}.nc"
         path = dump_dir / ".." / prefix / mem / fname
-        ds = xr.open_dataset(path, engine="netcdf4")
-        datasets.append(ds.expand_dims(ens=[mem]))
+        arrays, coords, halos, fxg_vals, fyg_vals, cx_val, cy_val = _read_member_file(path)
+        for name, tensor in arrays.items():
+            stacked[name].append(tensor)
+        if base_coords is None:
+            base_coords = coords
+        if halo_map is None:
+            halo_map = halos
+        if fxg is None:
+            fxg = fxg_vals
+            fyg = fyg_vals
+            cxg0 = cx_val
+            cyg0 = cy_val
+    data = {name: torch.stack(parts, dim=0) for name, parts in stacked.items()}
+    assert base_coords is not None and halo_map is not None and fxg is not None and fyg is not None
+    return RawState(tuple(MEMBERS), data, base_coords, halo_map, fxg, fyg, cxg0, cyg0)
 
-    raw = xr.concat(datasets, dim="ens")
-    return raw
 
-# ---------------------------------------------------------------------
-# 2. Convert SCALE → LETKF 
-# ---------------------------------------------------------------------
-def convert_scale_to_letkf(ds: xr.Dataset) -> xr.DataArray:
-    """
-    Convert SCALE prognostic variables → LETKF control variables.
-    Works directly on (ens, z, y, x).
-    No halo stripping.
-    """
-    #height = deundef(ds["height"]).astype(np.float64).transpose("ens", "z", "y", "x")
-    rho  = deundef(ds["DENS"]).astype(np.float64).transpose("ens", "z", "y", "x")
-    rhot = deundef(ds["RHOT"]).astype(np.float64).transpose("ens", "z", "y", "x")
+def _clean_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    mask = torch.abs(tensor - FILL) > 1.0e20
+    return torch.where(mask, tensor, torch.full_like(tensor, float("nan")))
 
-    # Momentum
-    momx = deundef(ds["MOMX"]).astype(np.float64).transpose("ens", "z", "y", "xh")
-    momy = deundef(ds["MOMY"]).astype(np.float64).transpose("ens", "z", "yh", "x")
-    momz = deundef(ds["MOMZ"]).astype(np.float64).transpose("ens", "zh", "y", "x")
 
-    x_mass = rho["x"]; y_mass = rho["y"]; z_mass = rho["z"]
-
-    momx = momx.rename({"xh": "x"}).assign_coords(x=x_mass)
-    momy = momy.rename({"yh": "y"}).assign_coords(y=y_mass)
-    momz = momz.isel(zh=slice(1, None)).rename({"zh": "z"}).assign_coords(z=z_mass)
+def convert_scale_to_letkf(raw: RawState) -> DataTensor:
+    rho = _clean_tensor(raw.data["DENS"])
+    rhot = _clean_tensor(raw.data["RHOT"])
+    momx = _clean_tensor(raw.data["MOMX"])
+    momy = _clean_tensor(raw.data["MOMY"])
+    momz = _clean_tensor(raw.data["MOMZ"])[:, 1:, :, :]
 
     u = momx / rho
     v = momy / rho
     w = momz / rho
 
-    # Moisture (species, ens, z, y, x)
-    moist = xr.concat(
-        [deundef(ds[name]).astype(np.float64)
-         for name in TRACER_CV["species"].values],
-        dim="species",
-    )
-    moist = moist.assign_coords(species=TRACER_CV["species"])
-    moist = moist.transpose("species", "ens", "z", "y", "x")
+    moist = torch.stack([_clean_tensor(raw.data[name]) for name in TRACER_SPECIES], dim=0)
+    moist_cl = torch.nan_to_num(moist, nan=0.0)
+    qdry = 1.0 - moist_cl.sum(dim=0)
 
-    # Thermodynamics
-    moist_cl = moist.fillna(0.0)
-    qdry = 1.0 - moist_cl.sum("species")
-
-    cv_tot = CVDry * qdry + (moist_cl * TRACER_CV).sum("species")
-    rtot   = RDRY * qdry + RVAP * moist_cl.sel(species="QV")
+    tracer_cv = TRACER_CV.view(-1, 1, 1, 1, 1)
+    cv_tot = CVDry * qdry + (moist_cl * tracer_cv).sum(dim=0)
+    species_index = {name: idx for idx, name in enumerate(TRACER_SPECIES)}
+    rtot = RDRY * qdry + RVAP * moist_cl[species_index["QV"]]
 
     base = (rhot * rtot) / PRE00
-    valid = (base > 0) & (rho > 0) & (cv_tot > 0) & (rtot > 0)
+    valid = (base > 0.0) & (rho > 0.0) & (cv_tot > 0.0) & (rtot > 0.0)
 
-    gamma = xr.where(valid, (cv_tot + rtot) / cv_tot, np.nan)
+    gamma = torch.where(valid, (cv_tot + rtot) / cv_tot, torch.full_like(cv_tot, float("nan")))
+    pressure = torch.where(valid, PRE00 * torch.pow(base, gamma), torch.full_like(base, float("nan")))
+    temperature = torch.where(valid, pressure / (rho * rtot), torch.full_like(base, float("nan")))
 
-    pressure    = xr.where(valid, PRE00 * base ** gamma, np.nan)
-    temperature = xr.where(valid, pressure / (rho * rtot), np.nan)
+    qv = moist[species_index["QV"]]
+    qc = moist[species_index["QC"]]
+    qr = moist[species_index["QR"]]
+    qi = moist[species_index["QI"]]
+    qs = moist[species_index["QS"]]
+    qg = moist[species_index["QG"]]
 
-    # LETKF variable stack
-    control = xr.concat(
-        [
-            u, v, w,
-            temperature, pressure,
-            moist.sel(species="QV", drop=True),
-            moist.sel(species="QC", drop=True),
-            moist.sel(species="QR", drop=True),
-            moist.sel(species="QI", drop=True),
-            moist.sel(species="QS", drop=True),
-            moist.sel(species="QG", drop=True),
-        ],
-        dim="variable",
+    control_stack = torch.stack(
+        [u, v, w, temperature, pressure, qv, qc, qr, qi, qs, qg],
+        dim=0,
     )
+    coords = {
+        "variable": CONTROL_ORDER,
+        "ens": raw.members,
+        "z": raw.coords["z"],
+        "y": raw.coords["y"],
+        "x": raw.coords["x"],
+    }
+    return DataTensor(control_stack, coords, ("variable", "ens", "z", "y", "x"))
 
-    control = control.assign_coords(variable=list(CONTROL_ORDER))
-    return control
+
+def strip_all_halos(ds: Dataset, halo_map: Dict[str, Tuple[int, int]] | None = None) -> Dataset:
+    halo = halo_map or ds.attrs.get("halo_map", {})
+    updated = {}
+    for name, var in ds.data_vars.items():
+        selectors = {}
+        for dim, (L, R) in halo.items():
+            if dim in var.dims and (L or R):
+                selectors[dim] = slice(L, None if R == 0 else -R)
+        updated[name] = var.isel(**selectors) if selectors else var
+    return Dataset(updated, attrs=ds.attrs)
 
 
-def strip_all_halos(control: xr.DataArray, halo_map) -> xr.DataArray:
-    out = control
-    for dim, (L, R) in halo_map.items():
-        if dim in out.dims:
-            out = out.isel({dim: slice(L, None if R == 0 else -R)})
-    return out
-
-def compute_grid_params(ds):
-    fxg = ds["FXG"].values
-    fyg = ds["FYG"].values
-    cxg0 = float(ds["CXG"].values[0])
-    cyg0 = float(ds["CYG"].values[0])
-    ds.close()
-    base_x = 0.5 * (fxg[0] + fxg[-1])
-    base_y = 0.5 * (fyg[0] + fyg[-1])
+def compute_grid_params(raw: RawState) -> tuple[float, float, float, float]:
+    fxg = raw.fxg
+    fyg = raw.fyg
+    cxg0 = raw.cxg0
+    cyg0 = raw.cyg0
+    base_x = float(0.5 * (fxg[0] + fxg[-1]))
+    base_y = float(0.5 * (fyg[0] + fyg[-1]))
     latrot0 = 0.5 * math.pi - BASE_LAT
     dist0 = 1.0 / math.tan(0.5 * latrot0)
     param_y = base_y - RADIUS * FACT * math.log(dist0)
     return base_x, param_y, cxg0, cyg0
-    
-def load_letkf_state(dump_dir, prefix, pe_tag, strip_hallow=True):
-    raw = read_and_concat_members(dump_dir, prefix, pe_tag)
+
+
+def _scalar_tensor(value: float) -> DataTensor:
+    return DataTensor(torch.as_tensor(value, dtype=torch.float64), {}, ())
+
+
+def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallow: bool = True) -> Dataset:
+    raw = read_and_concat_members(dump_dir, pe_tag, prefix)
     letkf_state = convert_scale_to_letkf(raw)
     base_x, param_y, cxg0, cyg0 = compute_grid_params(raw)
-    converted = xr.Dataset({
-        "state":letkf_state,
-        "lon": raw["lon"].isel(ens=0),
-        "lat": raw["lat"].isel(ens=0),
-        "height": raw["height"].isel(ens=0),
-        "base_x":base_x, 
-        "param_y":param_y, 
-        "cxg0":cxg0, "cyg0":cyg0
-    })
-    if strip_hallow:
-        halo_map = read_halo(raw)
-        converted = strip_all_halos(converted, halo_map)
-    return converted
+    y_coords = raw.coords["y"]
+    x_coords = raw.coords["x"]
+    z_coords = raw.coords["z"]
 
-def convert_letkf_to_scale(control: xr.DataArray) -> xr.Dataset:
-    """
-    Exact inverse of convert_scale_to_letkf().
-    Input:
-        control: LETKF control array with shape
-                 (variable, ens, z, y, x)
-    Output:
-        Dataset with fields:
-            DENS, RHOT, MOMX, MOMY, MOMZ,
-            QV, QC, QR, QI, QS, QG
-    """
+    lon = DataTensor(raw.data["lon"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
+    lat = DataTensor(raw.data["lat"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
+    height = DataTensor(raw.data["height"][0], {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
 
-    if set(control["variable"].values) != set(CONTROL_ORDER):
-        raise ValueError("LETKF variable order mismatch")
-
-    ctrl = control.transpose("variable", "ens", "z", "y", "x")
-
-    def _sel(name: str) -> xr.DataArray:
-        return ctrl.sel(variable=name).reset_coords(drop=True)
-
-    # ───────────────────────────────────────────────
-    # 1. Extract basic variables
-    # ───────────────────────────────────────────────
-    U = _sel("U")
-    V = _sel("V")
-    W = _sel("W")
-    T = _sel("T")
-    P = _sel("P")
-
-    # Moist species in correct order
-    moist = xr.concat(
-        [_sel(s) for s in TRACER_CV["species"].values],
-        dim="species"
-    )
-    moist = moist.assign_coords(species=TRACER_CV["species"])
-    moist = moist.transpose("species", "ens", "z", "y", "x")
-
-    # ───────────────────────────────────────────────
-    # 2. Thermodynamics – reverse of forward mapping
-    # ───────────────────────────────────────────────
-    qdry = (1.0 - moist.sum("species")).clip(min=1e-12)
-    rtot = (RDRY * qdry + RVAP * moist.sel(species="QV")).reset_coords(drop=True)
-    cv_tot = (CVDry * qdry + (moist * TRACER_CV).sum("species")).reset_coords(drop=True)
-
-    rho = (P / (rtot * T)).reset_coords(drop=True)
-    cvovcp = (cv_tot / (cv_tot + rtot)).reset_coords(drop=True)
-
-    rhot = (PRE00 / rtot * (P / PRE00) ** cvovcp).reset_coords(drop=True)
-
-    # ───────────────────────────────────────────────
-    # 3. Momentum (reverse of renamings/staggers)
-    # ───────────────────────────────────────────────
-    momx_mass = (rho * U).reset_coords(drop=True)
-    momy_mass = (rho * V).reset_coords(drop=True)
-    momz_mass = (rho * W).reset_coords(drop=True)
-
-    # MOMX: unstagger x (mass → xh)
-    momx = momx_mass.rename({"x": "xh"}).transpose("ens", "z", "y", "xh")
-
-    # MOMY: unstagger y (mass → yh)
-    momy = momy_mass.rename({"y": "yh"}).transpose("ens", "z", "yh", "x")
-
-    # MOMZ: restagger z → zh (one extra vertical face)
-    momz_faces = momz_mass.pad(z=(1, 0), mode="edge").rename({"z": "zh"})
-    momz = momz_faces.transpose("ens", "zh", "y", "x")
-
-    # ───────────────────────────────────────────────
-    # 4. Moisture species → individual prognostic vars
-    # ───────────────────────────────────────────────
-    moist_split = {
-        name: moist.sel(species=name).reset_coords(drop=True).transpose("ens", "z", "y", "x")
-        for name in TRACER_CV["species"].values
+    data_vars = {
+        "state": letkf_state,
+        "lon": lon,
+        "lat": lat,
+        "height": height,
+        "base_x": _scalar_tensor(base_x),
+        "param_y": _scalar_tensor(param_y),
+        "cxg0": _scalar_tensor(cxg0),
+        "cyg0": _scalar_tensor(cyg0),
     }
-
-    # ───────────────────────────────────────────────
-    # 5. Build Dataset
-    # ───────────────────────────────────────────────
-    ds = xr.Dataset(
-        data_vars={
-            "DENS": rho.transpose("ens", "z", "y", "x"),
-            "RHOT": rhot.transpose("ens", "z", "y", "x"),
-            "MOMX": momx,
-            "MOMY": momy,
-            "MOMZ": momz,
-            **{name: moist_split[name] for name in TRACER_CV["species"].values},
-        },
-        coords={
-            "ens": ctrl["ens"],
-            "x": ctrl["x"],
-            "y": ctrl["y"],
-            "z": ctrl["z"],
-            "xh": momx["xh"],
-            "yh": momy["yh"],
-            "zh": momz["zh"],
-        },
-    )
-
-    # Restore halo markers (consistent with forward version removing them)
-    for c in ("x", "xh", "y", "yh", "z", "zh"):
-        if c in ds:
-            ds[c].attrs["halo_local"] = (0, 0)
-
-    return ds
-
-def convert_letkf_scale_var(control: xr.DataArray) -> xr.Dataset:
-    """Map LETKF control variables back to SCALE prognostic fields."""
-    if "ens" not in control.dims:
-        raise ValueError("LETKF control array must include an 'ens' dimension.")
-    ctrl = control.transpose("variable", "ens", "z", "y", "x")
-
-    def _sel(name: str) -> xr.DataArray:
-        return ctrl.sel(variable=name).reset_coords(drop=True)
-
-    # Moisture block
-    moist = xr.concat([_sel(name) for name in TRACER_CV["species"].values], dim="species")
-    moist = moist.assign_coords(species=TRACER_CV["species"])
-    moist = moist.transpose("species", "ens", "z", "y", "x")
-
-    qdry = (1.0 - moist.sum("species")).clip(min=1e-12)
-    rtot = (RDRY * qdry + RVAP * moist.sel(species="QV")).reset_coords(drop=True)
-    cv_tot = (CVDry * qdry + (moist * TRACER_CV).sum("species")).reset_coords(drop=True)
-
-    pressure = _sel("P").transpose("ens", "z", "y", "x")
-    temperature = _sel("T").transpose("ens", "z", "y", "x")
-
-    rho = (pressure / (rtot * temperature)).reset_coords(drop=True)
-    cvovcp = (cv_tot / (cv_tot + rtot)).reset_coords(drop=True)
-    rhot = (PRE00 / rtot * (pressure / PRE00) ** cvovcp).reset_coords(drop=True)
-
-    momx_mass = (rho * _sel("U").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
-    momy_mass = (rho * _sel("V").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
-    momz_mass = (rho * _sel("W").transpose("ens", "z", "y", "x")).reset_coords(drop=True)
-    momz_faces = momz_mass.pad(z=(1, 0), mode="edge").rename({"z": "zh"})
-
-    x_mass = ctrl["x"].copy()
-    y_mass = ctrl["y"].copy()
-    z_mass = ctrl["z"].copy()
-    for coord in (x_mass, y_mass, z_mass):
-        coord.attrs["halo_local"] = (0, 0)
-
-    xh = xr.DataArray(x_mass.values, dims=("xh",), coords={"xh": x_mass.values}, attrs={"halo_local": (0, 0)})
-    yh = xr.DataArray(y_mass.values, dims=("yh",), coords={"yh": y_mass.values}, attrs={"halo_local": (0, 0)})
-    zh_vals = np.arange(z_mass.size + 1, dtype=np.float64)
-    zh = xr.DataArray(zh_vals, dims=("zh",), attrs={"halo_local": (0, 0)})
-
-    momx_data = momx_mass.transpose("ens", "y", "x", "z").rename({"x": "xh"}).assign_coords(xh=xh.values)
-    momy_data = momy_mass.transpose("ens", "y", "x", "z").rename({"y": "yh"}).assign_coords(yh=yh.values)
-    momz_data = momz_faces.assign_coords(zh=zh.values).transpose("ens", "y", "x", "zh")
-
-    def _moist(name: str) -> xr.DataArray:
-        return moist.sel(species=name).reset_coords(drop=True)
-
-    dataset = xr.Dataset(
-        data_vars={
-            "DENS": rho.transpose("ens", "y", "x", "z"),
-            "RHOT": rhot.transpose("ens", "y", "x", "z"),
-            "MOMX": momx_data,
-            "MOMY": momy_data,
-            "MOMZ": momz_data,
-            "QV": _moist("QV").transpose("ens", "y", "x", "z"),
-            "QC": _moist("QC").transpose("ens", "y", "x", "z"),
-            "QR": _moist("QR").transpose("ens", "y", "x", "z"),
-            "QI": _moist("QI").transpose("ens", "y", "x", "z"),
-            "QS": _moist("QS").transpose("ens", "y", "x", "z"),
-            "QG": _moist("QG").transpose("ens", "y", "x", "z"),
-        },
-        coords={
-            "x": x_mass,
-            "y": y_mass,
-            "z": z_mass,
-            "xh": xh,
-            "yh": yh,
-            "zh": zh,
-            "ens": ctrl["ens"],
-        },
-    )
-
+    coords = {
+        "variable": CONTROL_ORDER,
+        "ens": raw.members,
+        "z": z_coords,
+        "y": y_coords,
+        "x": x_coords,
+    }
+    dataset = Dataset(data_vars, coords=coords, attrs={"halo_map": raw.halo_map})
+    if strip_hallow:
+        dataset = strip_all_halos(dataset, raw.halo_map)
     return dataset
 
+
+def convert_letkf_to_scale(*_args, **_kwargs):
+    raise NotImplementedError("convert_letkf_to_scale is not available without xarray.")
+
+
+def convert_letkf_scale_var(*_args, **_kwargs):
+    raise NotImplementedError("convert_letkf_scale_var is not available without xarray.")
