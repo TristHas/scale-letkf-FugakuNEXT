@@ -76,4 +76,12 @@ def filter_sc23_obs(
         good_vr = np.abs(innov_vr) <= GROSS_ERROR_RADAR_VR * err[mask_vr]
         keep[np.where(mask_vr)[0][good_vr]] = True
 
-    return obs_ds.isel(obs=keep), keep
+    obs_valid = obs_ds.isel(obs=keep)
+    obs_valid = obs_valid.assign(
+        obs_orig=("obs", obs_valid["obs"].values)
+    )
+    obs_valid = obs_valid.assign_coords(
+        obs=np.arange(obs_valid.sizes["obs"])
+    )
+
+    return obs_valid, hx[keep]
