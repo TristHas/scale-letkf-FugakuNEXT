@@ -25,6 +25,8 @@ MODULE letkf_dump
   logical, save :: das_dump_banner_printed = .false.
   integer, parameter :: das_trace_max = 20
   integer, save :: das_trace_count = 0
+  character(len=filelenmax), save :: obsop_cal_base = ''
+  logical, save :: obsop_cal_ready = .false.
 
   public :: dump_letkf_obs_after_obsope
   public :: dump_letkf_obs_after_set
@@ -43,6 +45,8 @@ MODULE letkf_dump
   public :: dump_das_postproc_after
   public :: das_dump_enabled
   public :: prepare_das_dump_base
+  public :: dump_obsop_cal_state
+  public :: dump_obsop_cal_slot
 
 CONTAINS
 
@@ -211,6 +215,149 @@ CONTAINS
     call write_integer_vector(trim(base_dir)//'/'//'elm_u_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, elm_u_ctype)
     call write_integer_vector(trim(base_dir)//'/'//'typ_ctype_'//trim(domain_tag)//'.'//trim(ensemble_tag)//dump_suffix_ext, typ_ctype)
   END SUBROUTINE dump_letkf_localization_tables
+
+  SUBROUTINE dump_obsop_cal_state(iter, mem, islot, v3dg, v2dg, mv3d_slot, slope3d_slot)
+    integer, intent(in) :: iter
+    integer, intent(in) :: mem
+    integer, intent(in) :: islot
+    real(r_size), intent(in) :: v3dg(:,:,:,:)
+    real(r_size), intent(in) :: v2dg(:,:,:)
+    real(r_size), intent(in), optional :: mv3d_slot(:,:,:,:)
+    real(r_size), intent(in), optional :: slope3d_slot(:,:)
+
+    character(len=filelenmax) :: dir_stage
+    character(len=filelenmax) :: dir_root
+    character(len=filelenmax) :: file_path
+    character(len=32) :: stage_tag
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+    call ensure_obsop_cal_dir()
+
+    stage_tag = obsop_stage_tag(iter, islot)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix_for_mem(mem)
+
+    dir_root = append_dir(obsop_cal_base, 'state')
+    dir_root = append_dir(dir_root, domain_tag)
+    dir_root = append_dir(dir_root, ensemble_tag)
+    dir_stage = append_dir(dir_root, stage_tag)
+    call ensure_directory(dir_stage)
+
+    file_path = append_dir(dir_stage, 'v3dg'//dump_suffix_ext)
+    call write_real4d(file_path, real(v3dg, RP))
+
+    file_path = append_dir(dir_stage, 'v2dg'//dump_suffix_ext)
+    call write_real3d(file_path, real(v2dg, RP))
+
+    if (present(mv3d_slot)) then
+      file_path = append_dir(dir_stage, 'mv3dg'//dump_suffix_ext)
+      call write_real4d(file_path, real(mv3d_slot, RP))
+    end if
+
+    if (present(slope3d_slot)) then
+      file_path = append_dir(dir_stage, 'slope3dg'//dump_suffix_ext)
+      call write_real_matrix(file_path, slope3d_slot)
+    end if
+
+    call write_stage_metadata(dir_stage, iter, islot, mem)
+  END SUBROUTINE dump_obsop_cal_state
+
+  SUBROUTINE dump_obsop_cal_slot(iter, mem, islot, obs_sets, obs_idxs, obs_nn, obs_elms, obs_typs, &
+                                 obs_lon, obs_lat, obs_lev, obs_meta, obs_ri_global, obs_rj_global, &
+                                 obs_ril, obs_rjl, obs_rkz, obs_qc, obs_n1, obs_n2)
+    integer, intent(in) :: iter
+    integer, intent(in) :: mem
+    integer, intent(in) :: islot
+    integer, intent(in) :: obs_sets(:)
+    integer, intent(in) :: obs_idxs(:)
+    integer, intent(in) :: obs_nn(:)
+    integer, intent(in) :: obs_elms(:)
+    integer, intent(in) :: obs_typs(:)
+    real(r_size), intent(in) :: obs_lon(:)
+    real(r_size), intent(in) :: obs_lat(:)
+    real(r_size), intent(in) :: obs_lev(:)
+    real(r_size), intent(in) :: obs_meta(:,:)
+    real(r_size), intent(in) :: obs_ri_global(:)
+    real(r_size), intent(in) :: obs_rj_global(:)
+    real(r_size), intent(in) :: obs_ril(:)
+    real(r_size), intent(in) :: obs_rjl(:)
+    real(r_size), intent(in) :: obs_rkz(:)
+    integer, intent(in) :: obs_qc(:)
+    integer, intent(in) :: obs_n1
+    integer, intent(in) :: obs_n2
+
+    integer :: nobs
+    character(len=filelenmax) :: dir_stage
+    character(len=filelenmax) :: dir_root
+    character(len=filelenmax) :: file_path
+    character(len=32) :: stage_tag
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+    nobs = size(obs_sets)
+    if (nobs <= 0) return
+    call ensure_obsop_cal_dir()
+
+    stage_tag = obsop_stage_tag(iter, islot)
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix_for_mem(mem)
+
+    dir_root = append_dir(obsop_cal_base, 'obs')
+    dir_root = append_dir(dir_root, domain_tag)
+    dir_root = append_dir(dir_root, ensemble_tag)
+    dir_stage = append_dir(dir_root, stage_tag)
+    call ensure_directory(dir_stage)
+
+    file_path = append_dir(dir_stage, 'set'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_sets)
+
+    file_path = append_dir(dir_stage, 'idx'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_idxs)
+
+    file_path = append_dir(dir_stage, 'nn'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_nn)
+
+    file_path = append_dir(dir_stage, 'elm'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_elms)
+
+    file_path = append_dir(dir_stage, 'typ'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_typs)
+
+    file_path = append_dir(dir_stage, 'qc'//dump_suffix_ext)
+    call write_integer_vector(file_path, obs_qc)
+
+    file_path = append_dir(dir_stage, 'lon'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_lon)
+
+    file_path = append_dir(dir_stage, 'lat'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_lat)
+
+    file_path = append_dir(dir_stage, 'lev'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_lev)
+
+    file_path = append_dir(dir_stage, 'ri_global'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_ri_global)
+
+    file_path = append_dir(dir_stage, 'rj_global'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_rj_global)
+
+    file_path = append_dir(dir_stage, 'ril'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_ril)
+
+    file_path = append_dir(dir_stage, 'rjl'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_rjl)
+
+    file_path = append_dir(dir_stage, 'rkz'//dump_suffix_ext)
+    call write_real_vector(file_path, obs_rkz)
+
+    file_path = append_dir(dir_stage, 'meta'//dump_suffix_ext)
+    call write_real_matrix(file_path, obs_meta)
+
+    call write_stage_metadata(dir_stage, iter, islot, mem, nobs, obs_n1, obs_n2)
+  END SUBROUTINE dump_obsop_cal_slot
 
   SUBROUTINE dump_letkf_obs_nosort_coords()
     integer :: n
@@ -1241,6 +1388,50 @@ CONTAINS
       dir_out = dir_out(1:last_sep-1)
     end if
   END FUNCTION parent_dir
+
+  SUBROUTINE ensure_obsop_cal_dir()
+    character(len=filelenmax) :: dump_parent
+    if (obsop_cal_ready) return
+    dump_parent = parent_dir(trim_dir(LETKF_INPUT_DUMP_DIR))
+    obsop_cal_base = append_dir(dump_parent, 'obsop_cal')
+    call ensure_directory(obsop_cal_base)
+    obsop_cal_ready = .true.
+  END SUBROUTINE ensure_obsop_cal_dir
+
+  FUNCTION obsop_stage_tag(iter, islot) RESULT(tag)
+    integer, intent(in) :: iter
+    integer, intent(in) :: islot
+    character(len=32) :: tag
+    write(tag,'(A2,I4.4,A5,I4.4)') 'it', iter, '_slot', islot
+  END FUNCTION obsop_stage_tag
+
+  FUNCTION ensemble_suffix_for_mem(mem_index) RESULT(tag)
+    integer, intent(in) :: mem_index
+    character(len=memflen+3) :: tag
+    tag = 'mem'//mem_label(mem_index)
+  END FUNCTION ensemble_suffix_for_mem
+
+  SUBROUTINE write_stage_metadata(dir_stage, iter, islot, mem, nobs, n1, n2)
+    character(len=*), intent(in) :: dir_stage
+    integer, intent(in) :: iter
+    integer, intent(in) :: islot
+    integer, intent(in) :: mem
+    integer, intent(in), optional :: nobs
+    integer, intent(in), optional :: n1
+    integer, intent(in), optional :: n2
+    character(len=filelenmax) :: file_meta
+    integer :: unit
+
+    file_meta = append_dir(dir_stage, 'stage_meta.txt')
+    open(newunit=unit, file=trim(file_meta), status='replace')
+    write(unit,'(A,I0)') 'iter=', iter
+    write(unit,'(A,I0)') 'slot=', islot
+    write(unit,'(A,I0)') 'member=', mem
+    if (present(nobs)) write(unit,'(A,I0)') 'nobs=', nobs
+    if (present(n1)) write(unit,'(A,I0)') 'n1=', n1
+    if (present(n2)) write(unit,'(A,I0)') 'n2=', n2
+    close(unit)
+  END SUBROUTINE write_stage_metadata
 
   SUBROUTINE ensure_directory_local(dir_path)
     character(len=*), intent(in) :: dir_path

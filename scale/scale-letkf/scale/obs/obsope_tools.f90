@@ -9,6 +9,7 @@ MODULE obsope_tools
 !
 !=======================================================================
 !$USE OMP_LIB
+  use iso_fortran_env, only: int32
   USE common
   USE common_mpi
   USE common_scale
@@ -23,6 +24,12 @@ MODULE obsope_tools
 
   IMPLICIT NONE
   PUBLIC
+
+  character(len=filelenmax), parameter :: obsop_dump_dirname = 'obsop_cal'
+  character(len=*), parameter :: obsop_dump_suffix = '.bin'
+  integer, parameter :: obsop_dump_target_rank = 0  ! set to -1 to dump all ranks
+  character(len=filelenmax), save :: obsop_base_dir = ''
+  logical, save :: obsop_dir_ready = .false.
 
 CONTAINS
 
@@ -39,6 +46,7 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
 
   integer :: it, im, iof, islot, ierr
   integer :: n, nn, nsub, nmod, n1, n2
+  integer :: nobsl, nobsl_dump, islot2, iloc
 
   integer :: nobs     ! observation number processed in this subroutine
   integer :: nobs_all
@@ -73,6 +81,22 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
   real(r_size), allocatable :: slope3dg(:,:,:)
 
   real(r_size) :: ril, rjl, rk, rkz
+
+  integer, allocatable :: dump_sets(:)
+  integer, allocatable :: dump_idx(:)
+  integer, allocatable :: dump_nn(:)
+  integer, allocatable :: dump_elms(:)
+  integer, allocatable :: dump_typs(:)
+  integer, allocatable :: dump_qc(:)
+  real(r_size), allocatable :: dump_lon(:)
+  real(r_size), allocatable :: dump_lat(:)
+  real(r_size), allocatable :: dump_lev(:)
+  real(r_size), allocatable :: dump_meta(:,:)
+  real(r_size), allocatable :: dump_ri_global(:)
+  real(r_size), allocatable :: dump_rj_global(:)
+  real(r_size), allocatable :: dump_ril(:)
+  real(r_size), allocatable :: dump_rjl(:)
+  real(r_size), allocatable :: dump_rkz(:)
 
   character(filelenmax) :: obsdafile
   character(len=11) :: obsda_suffix = '.000000.dat'
@@ -390,9 +414,52 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
         n1 = bsna(islot-1, myrank_d) - bsna(SLOT_START-1, myrank_d) + 1
         n2 = bsna(islot,   myrank_d) - bsna(SLOT_START-1, myrank_d)
         slot_nobsg = sum(bsn(islot, :))
+        islot2 = islot - SLOT_START + 1
+        nobsl = max(n2 - n1 + 1, 0)
+        if (obsop_dump_active()) then
+          nobsl_dump = nobsl
+        else
+          nobsl_dump = 0
+        end if
+        if (nobsl_dump > 0) then
+          allocate(dump_sets(nobsl))
+          allocate(dump_idx(nobsl))
+          allocate(dump_nn(nobsl))
+          allocate(dump_elms(nobsl))
+          allocate(dump_typs(nobsl))
+          allocate(dump_qc(nobsl))
+          allocate(dump_lon(nobsl))
+          allocate(dump_lat(nobsl))
+          allocate(dump_lev(nobsl))
+          allocate(dump_meta(max_obs_info_meta,nobsl))
+          allocate(dump_ri_global(nobsl))
+          allocate(dump_rj_global(nobsl))
+          allocate(dump_ril(nobsl))
+          allocate(dump_rjl(nobsl))
+          allocate(dump_rkz(nobsl))
+          dump_sets = 0
+          dump_idx = 0
+          dump_nn = 0
+          dump_elms = 0
+          dump_typs = 0
+          dump_qc = 0
+          dump_lon = 0.0_r_size
+          dump_lat = 0.0_r_size
+          dump_lev = 0.0_r_size
+          dump_meta = 0.0_r_size
+          dump_ri_global = 0.0_r_size
+          dump_rj_global = 0.0_r_size
+          dump_ril = 0.0_r_size
+          dump_rjl = 0.0_r_size
+          dump_rkz = undef
+        end if
 
         if (slot_nobsg <= 0) then
           write (6, '(A)') ' -- no observations found in this time slot... do not need to read model data'
+          if (nobsl_dump > 0) then
+            deallocate(dump_sets, dump_idx, dump_nn, dump_elms, dump_typs, dump_qc, dump_lon, dump_lat, dump_lev, &
+                       dump_meta, dump_ri_global, dump_rj_global, dump_ril, dump_rjl, dump_rkz)
+          end if
           cycle
         end if
 
@@ -405,15 +472,40 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
 
         call read_ens_history_iter(it, islot, v3dg, v2dg)
 
+        if (obsop_dump_active()) then
+          if ( RADAR_ADDITIVE_Y18 ) then
+            call obsop_dump_state(it, im, islot, v3dg, v2dg, mv3dg(islot2,:,:,:,:), slope3dg(islot2,:,:))
+          else
+            call obsop_dump_state(it, im, islot, v3dg, v2dg)
+          end if
+        end if
+
         write (timer_str, '(A30,I4,A7,I4,A2)') 'obsope_cal:read_ens_history(t=', it, ', slot=', islot, '):'
         call mpi_timer(trim(timer_str), 2)
 
-!$omp parallel do private(nn,n,iof,ril,rjl,rk,rkz)
+!$omp parallel do private(nn,n,iof,ril,rjl,rk,rkz,iloc)
         do nn = n1, n2
           iof = obsda%set(nn)
           n = obsda%idx(nn)
 
           call rij_g2l(myrank_d, obs(iof)%ri(n), obs(iof)%rj(n), ril, rjl)
+
+          if (nobsl_dump > 0) then
+            iloc = nn - n1 + 1
+            dump_sets(iloc) = obsda%set(nn)
+            dump_idx(iloc) = obsda%idx(nn)
+            dump_nn(iloc) = nn
+            dump_elms(iloc) = obs(iof)%elm(n)
+            dump_typs(iloc) = obs(iof)%typ(n)
+            dump_lon(iloc) = obs(iof)%lon(n)
+            dump_lat(iloc) = obs(iof)%lat(n)
+            dump_lev(iloc) = obs(iof)%lev(n)
+            dump_meta(:,iloc) = obs(iof)%meta
+            dump_ri_global(iloc) = obs(iof)%ri(n)
+            dump_rj_global(iloc) = obs(iof)%rj(n)
+            dump_ril(iloc) = ril
+            dump_rjl(iloc) = rjl
+          end if
 
           if (.not. USE_OBS(obs(iof)%typ(n))) then
             obsda%qc(nn) = iqc_otype
@@ -455,11 +547,15 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
                 call Trans_XtoY_radar(obs(iof)%elm(n), obs(iof)%meta(1), obs(iof)%meta(2), obs(iof)%meta(3), ril, rjl, rkz, &
                                       obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn))
               endif
-              if (obsda%qc(nn) == iqc_ref_low) obsda%qc(nn) = iqc_good ! when process the observation operator, we don't care if reflectivity is too small
+            if (obsda%qc(nn) == iqc_ref_low) obsda%qc(nn) = iqc_good ! when process the observation operator, we don't care if reflectivity is too small
+            if (nobsl_dump > 0) then
+              iloc = nn - n1 + 1
+              dump_rkz(iloc) = rkz
+            end if
 
-              if (RADAR_PQV) then
-                call itpl_3d( v3dg(:,:,:,iv3dd_p), rkz, ril, rjl, obsda%pm(nn) )
-                call itpl_3d( v3dg(:,:,:,iv3dd_t), rkz, ril, rjl, obsda%tm(nn) )
+            if (RADAR_PQV) then
+              call itpl_3d( v3dg(:,:,:,iv3dd_p), rkz, ril, rjl, obsda%pm(nn) )
+              call itpl_3d( v3dg(:,:,:,iv3dd_t), rkz, ril, rjl, obsda%tm(nn) )
                 call itpl_3d( v3dg(:,:,:,iv3dd_q), rkz, ril, rjl, obsda%qv(nn) )
               end if
 
@@ -477,6 +573,15 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
  
         write (timer_str, '(A30,I4,A7,I4,A2)') 'obsope_cal:obsope_step_2   (t=', it, ', slot=', islot, '):'
         call mpi_timer(trim(timer_str), 2)
+
+        if (nobsl_dump > 0) then
+          dump_qc = obsda%qc(n1:n2)
+          call obsop_dump_slot(it, im, islot, dump_sets, dump_idx, dump_nn, dump_elms, dump_typs, &
+                               dump_lon, dump_lat, dump_lev, dump_meta, dump_ri_global, dump_rj_global, &
+                               dump_ril, dump_rjl, dump_rkz, dump_qc, n1, n2)
+          deallocate(dump_sets, dump_idx, dump_nn, dump_elms, dump_typs, dump_qc, dump_lon, dump_lat, dump_lev, &
+                     dump_meta, dump_ri_global, dump_rj_global, dump_ril, dump_rjl, dump_rkz)
+        end if
       end do ! [ islot = SLOT_START, SLOT_END ]
 
       call mpi_timer('', 2)
@@ -531,6 +636,252 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
 
   return
 end subroutine obsope_cal
+
+SUBROUTINE obsop_dump_state(iter, mem, islot, v3dg, v2dg, mv3d_slot, slope3d_slot)
+  integer, intent(in) :: iter, mem, islot
+  real(r_size), intent(in) :: v3dg(:,:,:,:)
+  real(r_size), intent(in) :: v2dg(:,:,:)
+  real(r_size), intent(in), optional :: mv3d_slot(:,:,:,:)
+  real(r_size), intent(in), optional :: slope3d_slot(:,:)
+  character(len=filelenmax) :: stage_dir
+  character(len=filelenmax) :: file_path
+
+  if (.not. obsop_dump_active()) return
+  call obsop_prepare_base()
+  stage_dir = obsop_stage_directory('state', mem, islot, iter)
+  call obsop_write_real4d(append_dir(stage_dir, 'v3dg'//obsop_dump_suffix), v3dg)
+  call obsop_write_real3d(append_dir(stage_dir, 'v2dg'//obsop_dump_suffix), v2dg)
+  if (present(mv3d_slot)) then
+    call obsop_write_real4d(append_dir(stage_dir, 'mv3dg'//obsop_dump_suffix), mv3d_slot)
+  end if
+  if (present(slope3d_slot)) then
+    call obsop_write_real_matrix(append_dir(stage_dir, 'slope3dg'//obsop_dump_suffix), slope3d_slot)
+  end if
+  file_path = append_dir(stage_dir, 'stage_meta.txt')
+  call obsop_write_stage_meta(file_path, iter, islot, mem, -1, -1, -1)
+END SUBROUTINE obsop_dump_state
+
+SUBROUTINE obsop_dump_slot(iter, mem, islot, obs_sets, obs_idxs, obs_nn, obs_elms, obs_typs, &
+                           obs_lon, obs_lat, obs_lev, obs_meta, obs_ri_global, obs_rj_global, &
+                           obs_ril, obs_rjl, obs_rkz, obs_qc, obs_n1, obs_n2)
+  integer, intent(in) :: iter, mem, islot
+  integer, intent(in) :: obs_sets(:), obs_idxs(:), obs_nn(:), obs_elms(:), obs_typs(:)
+  integer, intent(in) :: obs_qc(:)
+  real(r_size), intent(in) :: obs_lon(:), obs_lat(:), obs_lev(:)
+  real(r_size), intent(in) :: obs_meta(:,:)
+  real(r_size), intent(in) :: obs_ri_global(:), obs_rj_global(:)
+  real(r_size), intent(in) :: obs_ril(:), obs_rjl(:), obs_rkz(:)
+  integer, intent(in) :: obs_n1, obs_n2
+  integer :: nobs
+  character(len=filelenmax) :: stage_dir
+  character(len=filelenmax) :: file_path
+
+  if (.not. obsop_dump_active()) return
+  nobs = size(obs_sets)
+  if (nobs <= 0) return
+  call obsop_prepare_base()
+  stage_dir = obsop_stage_directory('obs', mem, islot, iter)
+
+  call obsop_write_integer_vector(append_dir(stage_dir, 'set'//obsop_dump_suffix), obs_sets)
+  call obsop_write_integer_vector(append_dir(stage_dir, 'idx'//obsop_dump_suffix), obs_idxs)
+  call obsop_write_integer_vector(append_dir(stage_dir, 'nn'//obsop_dump_suffix), obs_nn)
+  call obsop_write_integer_vector(append_dir(stage_dir, 'elm'//obsop_dump_suffix), obs_elms)
+  call obsop_write_integer_vector(append_dir(stage_dir, 'typ'//obsop_dump_suffix), obs_typs)
+  call obsop_write_integer_vector(append_dir(stage_dir, 'qc'//obsop_dump_suffix), obs_qc)
+  call obsop_write_real_vector(append_dir(stage_dir, 'lon'//obsop_dump_suffix), obs_lon)
+  call obsop_write_real_vector(append_dir(stage_dir, 'lat'//obsop_dump_suffix), obs_lat)
+  call obsop_write_real_vector(append_dir(stage_dir, 'lev'//obsop_dump_suffix), obs_lev)
+  call obsop_write_real_vector(append_dir(stage_dir, 'ri_global'//obsop_dump_suffix), obs_ri_global)
+  call obsop_write_real_vector(append_dir(stage_dir, 'rj_global'//obsop_dump_suffix), obs_rj_global)
+  call obsop_write_real_vector(append_dir(stage_dir, 'ril'//obsop_dump_suffix), obs_ril)
+  call obsop_write_real_vector(append_dir(stage_dir, 'rjl'//obsop_dump_suffix), obs_rjl)
+  call obsop_write_real_vector(append_dir(stage_dir, 'rkz'//obsop_dump_suffix), obs_rkz)
+  call obsop_write_real_matrix(append_dir(stage_dir, 'meta'//obsop_dump_suffix), obs_meta)
+
+  file_path = append_dir(stage_dir, 'stage_meta.txt')
+  call obsop_write_stage_meta(file_path, iter, islot, mem, nobs, obs_n1, obs_n2)
+END SUBROUTINE obsop_dump_slot
+
+SUBROUTINE obsop_prepare_base()
+  character(len=filelenmax) :: parent
+  if (obsop_dir_ready) return
+  parent = obsop_parent_dir(obsop_trim_dir(LETKF_INPUT_DUMP_DIR))
+  obsop_base_dir = append_dir(parent, obsop_dump_dirname)
+  call obsop_mkdir(obsop_base_dir)
+  obsop_dir_ready = .true.
+END SUBROUTINE obsop_prepare_base
+
+FUNCTION obsop_stage_directory(section, mem, islot, iter) RESULT(dir_out)
+  character(len=*), intent(in) :: section
+  integer, intent(in) :: mem, islot, iter
+  character(len=filelenmax) :: dir_out
+  character(len=32) :: stage_tag
+  write(stage_tag,'(A2,I4.4,A5,I4.4)') 'it', iter, '_slot', islot
+  dir_out = append_dir(obsop_base_dir, trim(section))
+  dir_out = append_dir(dir_out, obsop_domain_tag())
+  dir_out = append_dir(dir_out, obsop_member_tag(mem))
+  dir_out = append_dir(dir_out, trim(stage_tag))
+  call obsop_mkdir(dir_out)
+END FUNCTION obsop_stage_directory
+
+FUNCTION obsop_domain_tag() RESULT(tag)
+  character(len=8) :: tag
+  write(tag,'(A2,I6.6)') 'pe', myrank_d
+END FUNCTION obsop_domain_tag
+
+FUNCTION obsop_member_tag(mem_index) RESULT(tag)
+  integer, intent(in) :: mem_index
+  character(len=memflen+3) :: tag
+  character(len=memflen) :: core
+  if (mem_index >= 1 .and. mem_index <= MEMBER) then
+    write(core,'(I4.4)') mem_index
+  else if (mem_index == mmean) then
+    core = memf_mean
+  else if (mem_index == mmdet) then
+    core = memf_mdet
+  else if (mem_index == mmgue) then
+    core = memf_mgue
+  else
+    write(core,'(I4.4)') mem_index
+  end if
+  tag = 'mem'//trim(core)
+END FUNCTION obsop_member_tag
+
+SUBROUTINE obsop_mkdir(path)
+  character(len=*), intent(in) :: path
+  if (myrank == 0) then
+    call execute_command_line('mkdir -p ' // trim(path))
+  end if
+END SUBROUTINE obsop_mkdir
+
+FUNCTION obsop_trim_dir(path_in) RESULT(path_out)
+  character(len=*), intent(in) :: path_in
+  character(len=filelenmax) :: path_out
+  path_out = adjustl(path_in)
+  if (len_trim(path_out) == 0) path_out = 'letkf_dump'
+END FUNCTION obsop_trim_dir
+
+FUNCTION obsop_parent_dir(dir_in) RESULT(dir_out)
+  character(len=*), intent(in) :: dir_in
+  character(len=filelenmax) :: dir_out
+  integer :: i, last_sep, end_pos
+  dir_out = adjustl(dir_in)
+  end_pos = len_trim(dir_out)
+  if (end_pos <= 0) then
+    dir_out = '.'
+    return
+  end if
+  do while (end_pos > 1 .and. (dir_out(end_pos:end_pos) == '/' .or. dir_out(end_pos:end_pos) == '\'))
+    end_pos = end_pos - 1
+  end do
+  last_sep = 0
+  do i = 1, end_pos
+    if (dir_out(i:i) == '/' .or. dir_out(i:i) == '\') last_sep = i
+  end do
+  if (last_sep <= 0) then
+    dir_out = '.'
+  else if (last_sep == 1 .and. dir_out(1:1) == '/') then
+    dir_out = '/'
+  else
+    dir_out = dir_out(1:last_sep-1)
+  end if
+END FUNCTION obsop_parent_dir
+
+FUNCTION append_dir(parent, child) RESULT(path)
+  character(len=*), intent(in) :: parent
+  character(len=*), intent(in) :: child
+  character(len=filelenmax) :: path
+  path = trim(parent)//'/'//trim(child)
+END FUNCTION append_dir
+
+SUBROUTINE obsop_write_real_vector(path, data)
+  character(len=*), intent(in) :: path
+  real(r_size), intent(in) :: data(:)
+  integer :: unit
+  integer(int32) :: nd, dims(1)
+  nd = 1
+  dims(1) = size(data)
+  open(newunit=unit, file=trim(path), status='replace', access='stream', form='unformatted')
+  write(unit) nd
+  write(unit) dims
+  if (dims(1) > 0) write(unit) data
+  close(unit)
+END SUBROUTINE obsop_write_real_vector
+
+SUBROUTINE obsop_write_integer_vector(path, data)
+  character(len=*), intent(in) :: path
+  integer, intent(in) :: data(:)
+  integer :: unit
+  integer(int32) :: nd, dims(1)
+  nd = 1
+  dims(1) = size(data)
+  open(newunit=unit, file=trim(path), status='replace', access='stream', form='unformatted')
+  write(unit) nd
+  write(unit) dims
+  if (dims(1) > 0) write(unit) data
+  close(unit)
+END SUBROUTINE obsop_write_integer_vector
+
+SUBROUTINE obsop_write_real_matrix(path, data)
+  character(len=*), intent(in) :: path
+  real(r_size), intent(in) :: data(:,:)
+  integer :: unit
+  integer(int32) :: nd, dims(2)
+  nd = 2
+  dims = (/ size(data,1), size(data,2) /)
+  open(newunit=unit, file=trim(path), status='replace', access='stream', form='unformatted')
+  write(unit) nd
+  write(unit) dims
+  if (dims(1) > 0 .and. dims(2) > 0) write(unit) data
+  close(unit)
+END SUBROUTINE obsop_write_real_matrix
+
+SUBROUTINE obsop_write_real3d(path, data)
+  character(len=*), intent(in) :: path
+  real(r_size), intent(in) :: data(:,:,:)
+  integer :: unit
+  integer(int32) :: nd, dims(3)
+  nd = 3
+  dims = (/ size(data,1), size(data,2), size(data,3) /)
+  open(newunit=unit, file=trim(path), status='replace', access='stream', form='unformatted')
+  write(unit) nd
+  write(unit) dims
+  if (product(dims) > 0) write(unit) data
+  close(unit)
+END SUBROUTINE obsop_write_real3d
+
+SUBROUTINE obsop_write_real4d(path, data)
+  character(len=*), intent(in) :: path
+  real(r_size), intent(in) :: data(:,:,:,:)
+  integer :: unit
+  integer(int32) :: nd, dims(4)
+  nd = 4
+  dims = (/ size(data,1), size(data,2), size(data,3), size(data,4) /)
+  open(newunit=unit, file=trim(path), status='replace', access='stream', form='unformatted')
+  write(unit) nd
+  write(unit) dims
+  if (product(dims) > 0) write(unit) data
+  close(unit)
+END SUBROUTINE obsop_write_real4d
+
+SUBROUTINE obsop_write_stage_meta(path, iter, islot, mem, nobs, n1, n2)
+  character(len=*), intent(in) :: path
+  integer, intent(in) :: iter, islot, mem
+  integer, intent(in) :: nobs, n1, n2
+  integer :: unit
+  open(newunit=unit, file=trim(path), status='replace')
+  write(unit,'(A,I0)') 'iter=', iter
+  write(unit,'(A,I0)') 'slot=', islot
+  write(unit,'(A,I0)') 'member=', mem
+  write(unit,'(A,I0)') 'nobs=', nobs
+  write(unit,'(A,I0)') 'n1=', n1
+  write(unit,'(A,I0)') 'n2=', n2
+  close(unit)
+END SUBROUTINE obsop_write_stage_meta
+
+LOGICAL FUNCTION obsop_dump_active()
+  obsop_dump_active = LETKF_INPUT_DUMP .and. (obsop_dump_target_rank < 0 .or. myrank == obsop_dump_target_rank)
+END FUNCTION obsop_dump_active
 
 !-----------------------------------------------------------------------
 ! Observation generator calculation
