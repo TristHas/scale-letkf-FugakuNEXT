@@ -1,23 +1,34 @@
 from __future__ import annotations
+import math
+
 import numpy as np
 import torch
 import xarray as xr
 
-from .grid_proj import (
-    compute_grid_indices_from_state,
-    compute_obs_grid_idx,
-)
-from .interp_obs_state import sample_state
-from .obs_op import compute_all_hx
-from .filter_obs import filter_sc23_obs
+from .spatial.grid_proj import compute_obs_grid_idx
+from .spatial.map_obs_to_state import gather_obs
+from .spatial.map_state_to_obs import read_all_inov
 
-HORI_LOCAL_RADAR_OBSNOREF = 2000.0
-VERT_LOCAL_RADAR_OBSNOREF = 2000.0
-MAX_OBS_PER_GRID = 100
-DIST_ZERO_FAC = 3.651483717
-DX = 100.0
-DY = 100.0
-MEMBERS = ("0001", "0002")
+from .obs_op.filter_obs import filter_sc23_obs
+from .params import (HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF,
+                     MAX_OBS_PER_GRID, DIST_ZERO_FAC, DX, DY, MEMBERS)
+
+def pre_letkf(obs, states, device, chunk_size=1024):
+    # Step 1: Populate observations with hx
+    obs = obs.to(device)
+    obs = compute_obs_grid_idx(obs)
+    obs = read_all_inov(obs, states, device=device)
+    obs_valid = filter_sc23_obs(obs)
+
+    # Step 2: Populate each state cell with the nearest observation hx
+    halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
+    halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
+    results = { tile_index:gather_obs(state_ds, obs_valid, tile_index, 
+                             halo_i, halo_j, 
+                             device=device, chunk_size=chunk_size)\
+                for tile_index, state_ds in states.items()}
+    return results
+
 
 
 def extract_coordinate_tensors(
@@ -155,68 +166,3 @@ def assemble_cell_outputs(
         "mask":valid_mask
     }
 
-def pre_letkf_pipeline(obs, state_ds, pe_tag, 
-                       device = torch.device("cuda:2"),
-                       chunk_size = 1024):
-    state = (
-        state_ds["state"]
-        .transpose("y", "x", "z", "ens", "variable")
-        .sel(ens=list(MEMBERS))
-    )
-    obs_filtered = compute_obs_grid_idx(obs, state_ds, pe_tag)
-
-    samples, _ = sample_state(
-        state,
-        state_ds["height"].values,
-        obs_filtered["ri_local"].values,
-        obs_filtered["rj_local"].values,
-        obs_filtered["lev"].values,
-    )
-    
-    obs_state = torch.from_numpy(samples.transpose(2, 0, 1)).to(device=device, dtype=torch.float64)
-    
-    hx = compute_all_hx(obs_state, obs_filtered)
-    hx_mean = hx.mean(dim=1, keepdim=True)
-    
-    obs_filtered, keep = filter_sc23_obs(obs_filtered, hx)
-    hx = hx[keep]
-    hx_mean = hx_mean[keep]
-    
-    coords = extract_coordinate_tensors(state_ds, obs_filtered, pe_tag, device=device, dtype=torch.float64)
-    topk = chunked_topk_neighbors(
-        coords["grid_xy"],
-        coords["grid_z"],
-        coords["obs_xy"],
-        coords["obs_z"],
-        horiz_loc=HORI_LOCAL_RADAR_OBSNOREF,
-        vert_loc=VERT_LOCAL_RADAR_OBSNOREF,
-        dist_zero_fac=DIST_ZERO_FAC,
-        max_obs_per_grid=MAX_OBS_PER_GRID,
-        chunk_size=chunk_size,
-    )
-    
-    assembled = assemble_cell_outputs(
-        topk["topk_vals"],
-        topk["topk_idx"],
-        topk["valid_mask"],
-        hx,
-        hx_mean,
-        obs_filtered,
-        var_local_factor=1.0,
-    )
-    
-    results = {
-            "hdxf": assembled["hdxf"].cpu().numpy(),
-            "dep": assembled["dep"].cpu().numpy(),
-            "rloc": assembled["rloc"].cpu().numpy(),
-            "rdiag": assembled["rdiag"].cpu().numpy(),
-            "counts": assembled["counts"].cpu().numpy(),
-            "mask": assembled["mask"].cpu().numpy(),
-            "obs_indices": assembled["indices"].cpu().numpy(),
-            "grid_info": {
-                "ri": coords["grid_xy"][:, 0].cpu().numpy() / DX,
-                "rj": coords["grid_xy"][:, 1].cpu().numpy() / DY,
-                "n_horiz": coords["horiz_len"],
-            },
-        }
-    return results

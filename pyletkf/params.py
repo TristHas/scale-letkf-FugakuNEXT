@@ -1,0 +1,67 @@
+import math
+
+
+#LETKF PARAMS
+INFL_MUL_ADAPTIVE = False
+INFL_ADD = 0.0
+INFL_ADD_Q_RATIO = False
+SIGMA_B = 0.04
+RELAX_ALPHA = 0.95
+RELAX_ALPHA_SPREAD = 0.0
+RELAX_SPREAD_OUT = False
+dist_zero_fac = 3.651483717
+Q_UPDATE_TOP = 30000.0
+Q_SPRD_MAX = 0.5
+mmdet = None
+mmdetin = None
+
+###
+### Grid parametrization
+###
+RADIUS = 6_371_220.0
+BASE_LON_DEG = 139.609
+BASE_LAT_DEG = 35.861
+BASE_LON = math.radians(BASE_LON_DEG)
+BASE_LAT = math.radians(BASE_LAT_DEG)
+FACT = math.cos(BASE_LAT)
+
+###
+### Grid division
+###
+PRC_NUM_X = 4
+PRC_NUM_Y = 5
+NX_TILE = 320
+NY_TILE = 256
+DX = 100.0
+DY = 100.0
+
+TOTAL_NX = NX_TILE * PRC_NUM_X
+TOTAL_NY = NY_TILE * PRC_NUM_Y
+
+###
+### Radar
+###
+HORI_LOCAL_RADAR_OBSNOREF = 2000.0
+VERT_LOCAL_RADAR_OBSNOREF = 2000.0
+DIST_ZERO_FAC = 3.651483717
+MAX_OBS_PER_GRID = 100
+
+###
+### HALOS
+###
+IHALO = 2
+JHALO = 2
+KHALO = 2
+
+###
+### MISC
+###
+NENS = 2
+MEMBERS = ("0001", "0002")
+
+GRID_PARAMS = {
+  "base_x": 64000.0,
+  "param_y": -3_402_148.0178926853,
+  "cxg0": -150.0,
+  "cyg0": -150.0,
+}
