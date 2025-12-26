@@ -2,7 +2,10 @@ import math
 import torch
 from xtensor import Dataset, DataTensor
 
-from ..params import * 
+from ..params import (RADIUS, FACT, BASE_LON,
+                      DX, DY, GRID_PARAMS, 
+                      NX_TILE, NY_TILE,
+                      IHALO, JHALO)
 
 def _lonlat_to_grid_indices(
         lon_deg: torch.Tensor,
@@ -38,14 +41,9 @@ def populate_obs_global_indices(obs: Dataset, grid_params=GRID_PARAMS) -> Datase
                       rj_global=DataTensor(rj, obs["lat"].coords, ("obs",)))
 
 def populate_obs_local_idx(obs: Dataset) -> Dataset:
-    ri_tile = obs["ri_global"].data - obs["ri_global"].coords["obs"][0] // NX_TILE * NX_TILE
-    rj_tile = obs["rj_global"].data - obs["rj_global"].coords["obs"][0] // NY_TILE * NY_TILE
-    ri_local = torch.clamp(ri_tile - IHALO, 1.0, NX_TILE - 1.0e-6)
-    rj_local = torch.clamp(rj_tile - JHALO, 1.0, NY_TILE - 1.0e-6)
-    return obs.assign(
-      ri_local=DataTensor(ri_local, obs["ri_global"].coords, ("obs",)),
-      rj_local=DataTensor(rj_local, obs["rj_global"].coords, ("obs",)),
-    )
+    obs["ri_local"] = (("obs",), ((obs["ri_global"].values - 1) % NX_TILE) + 1)
+    obs["rj_local"] = (("obs",), ((obs["rj_global"].values - 1) % NY_TILE) + 1)
+    return obs
 
 def compute_obs_grid_idx(obs: Dataset, grid_params=GRID_PARAMS) -> Dataset:
     obs = populate_obs_global_indices(obs, grid_params=grid_params)
