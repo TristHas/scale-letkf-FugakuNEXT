@@ -17,16 +17,18 @@ from .params import (HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF,
 def pre_letkf(obs, states, chunk_size=1024):
     # Step 0: Populate obs with their grid indices
     obs = compute_obs_grid_idx(obs)
+    device = obs["dat"].device
     # Step 1: Populate observations with hx
-    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
+    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds.to(device), tile_index) \
                           for tile_index, state_ds in tqdm(states.items())])
+    
     obs = assemble_all_hx(obs, states, hxs, obs_idxs)
     # Step 2: Filter obs
     obs_valid = filter_sc23_obs(obs)
     # Step 3: Populate each state cell with the nearest observation hx
     halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
     halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
-    results = { tile_index: gather_obs(state_ds, obs_valid, tile_index, 
+    results = { tile_index: gather_obs(state_ds.to(device), obs_valid, tile_index, 
                                        halo_i, halo_j, chunk_size=chunk_size)\
                 for tile_index, state_ds in states.items()}
     
