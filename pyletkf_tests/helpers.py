@@ -15,7 +15,12 @@ from pyletkf.io.das_letkf_dumps import (
     load_das_postproc_after,
     load_das_postproc_before,
 )
-from pyletkf.io.letkf_dumps import load_rank_members
+from pyletkf.io.letkf_dumps import (
+    _normalize_member,
+    _normalize_pe_tag,
+    _read_binary_array,
+    load_rank_members,
+)
 from pyletkf.params import (
     HORI_LOCAL_RADAR_OBSNOREF,
     MAX_OBS_PER_GRID,
@@ -62,6 +67,22 @@ def cell_index(ij: int, ilev: int, nlev: int) -> int:
 
 def load_analysis_da(dump_root: Path, pe_tag: str) -> xr.DataArray:
     return load_rank_members(dump_root, "anal3d", pe_tag)
+
+def load_obsdanosort_coords(
+    dump_root: Path, pe_tag: str, member: str = "mem0001"
+) -> tuple[np.ndarray, np.ndarray]:
+    stage_dir = Path(dump_root) / "obsda_after_set_letkf"
+    pe_norm = _normalize_pe_tag(pe_tag)
+    mem_norm = _normalize_member(member)
+    ri_path = stage_dir / f"obsdanosort_ri_{pe_norm}.{mem_norm}.bin"
+    rj_path = stage_dir / f"obsdanosort_rj_{pe_norm}.{mem_norm}.bin"
+    if not ri_path.exists() or not rj_path.exists():
+        raise FileNotFoundError(
+            f"obsdanosort files missing for {pe_norm}.{mem_norm}"
+        )
+    ri_vals = _read_binary_array(ri_path, ">f8").reshape(-1).astype(np.float64)
+    rj_vals = _read_binary_array(rj_path, ">f8").reshape(-1).astype(np.float64)
+    return ri_vals, rj_vals
 
 def _bool_from_meta(meta_val: str | bool) -> bool:
     if isinstance(meta_val, bool):

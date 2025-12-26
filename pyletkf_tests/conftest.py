@@ -10,8 +10,8 @@ from pyletkf.params import MEMBERS
 from pyletkf.pre_letkf import pre_letkf
 
 TARGET_DUMP_ROOT = Path("result/SC23/20210730060030/letkf_dump")
-TARGET_PE = "pe000000"
-TARGET_TILE_INDEX = 0
+TARGET_PE = "pe000005"
+TARGET_TILE_INDEX = 5
 RADAR_PATH = Path("result/SC23/obs_radar/radar_20210730060030.dat")
 
 
@@ -20,7 +20,6 @@ def _ensure_data_available():
         pytest.skip(f"LETKF dumps not found at {TARGET_DUMP_ROOT}")
     if not RADAR_PATH.exists():
         pytest.skip(f"Radar observations not found at {RADAR_PATH}")
-
 
 @pytest.fixture(scope="session")
 def dump_root():
@@ -54,4 +53,3 @@ def pre_letkf_dataset(radar_dataset, state_dataset, target_tile):
     device = torch.device("cpu")
     results = pre_letkf(radar_dataset, {target_tile: state_dataset}, device=device, chunk_size=2048)
     return results[target_tile]
-
