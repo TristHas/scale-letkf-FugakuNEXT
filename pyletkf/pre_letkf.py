@@ -29,7 +29,7 @@ def pre_letkf(obs, states, chunk_size=1024):
     halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
     halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
     results = { tile_index: gather_obs(state_ds.to(device), obs_valid, tile_index, 
-                                       halo_i, halo_j, chunk_size=chunk_size)\
+                                       halo_i, halo_j, chunk_size=chunk_size).cpu()\
                 for tile_index, state_ds in states.items()}
     
     return results
