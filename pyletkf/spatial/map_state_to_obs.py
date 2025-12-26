@@ -6,7 +6,7 @@ from tqdm.auto import tqdm
 import torch
 from xtensor import DataTensor, Dataset
 
-from ..obs_op import ID_RADAR_REF, ID_RADAR_VR, ref_operator, vr_operator
+from ..obs_op import compute_all_hx
 from ..params import PRC_NUM_X, NX_TILE, NY_TILE, IHALO, JHALO, KHALO
 
 def _fractional_index_unit(size: int, coord: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -94,24 +94,6 @@ def sample_state(
     rk = iz0.to(torch.float64) + fz + KHALO
     return samples, rk
 
-def compute_all_hx(obs_state: torch.Tensor, obs_radar: Dataset) -> torch.Tensor:
-    device = obs_state.device
-    dtype = obs_state.dtype
-    obs_type = obs_radar["elm"].data.to(device=device, dtype=torch.int64)
-    hx_out = torch.empty(obs_state.shape[1], obs_state.shape[2], device=device, dtype=dtype)
-
-    mask_ref = obs_type == ID_RADAR_REF
-    if mask_ref.any():
-        hx_out[mask_ref] = ref_operator(obs_state[:, mask_ref])
-
-    mask_vr = obs_type == ID_RADAR_VR
-    if mask_vr.any():
-        obs_vr = obs_radar.isel(obs=torch.nonzero(mask_vr, as_tuple=False).squeeze(1))
-        obs_state_vr = obs_state[:, mask_vr]
-        hx_out[mask_vr] = vr_operator(obs_state_vr, obs_vr)
-
-    return hx_out
-
 def _subset_obs(obs: Dataset, mask: torch.Tensor) -> Dataset | None:
     indices = torch.nonzero(mask, as_tuple=False).squeeze(1)
     if indices.numel() == 0:
@@ -131,7 +113,57 @@ def filter_obs_to_tile_index(obs: Dataset, tile_index: int) -> Dataset | None:
     mask = (rank_i == target_i) & (rank_j == target_j)
     return _subset_obs(obs, mask)
 
-def read_all_inov(
+def read_all_tile_hx_sequentially(obs, states):
+    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
+                        for tile_index, state_ds in tqdm(states.items())])
+    return hxs, obs_idxs
+
+def read_tile_hx(obs, state_ds, tile_index):
+    """
+        
+    """
+    obs_tile = filter_obs_to_tile_index(obs, tile_index)
+    if obs_tile is None or obs_tile.sizes["obs"] == 0: return (None, None)
+    
+    state = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
+    device = state.device
+    
+    samples, _ = sample_state(
+      state.to(device),
+      state_ds["height"].to(device),
+      obs_tile["ri_local"],
+      obs_tile["rj_local"],
+      obs_tile["lev"],
+    )
+    
+    obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
+    hx = compute_all_hx(obs_state, obs_tile)
+    obs_indices = obs_tile["obs"].data.long()
+    return hx, obs_indices
+
+def assemble_all_hx(obs, states, hxs, obs_idxs):
+    """
+    Build the full hx matrix (obs × members) by looping over tiles and
+    running the observation operator on the locally interpolated state.
+    """
+    n_obs = obs.sizes["obs"]
+    n_members = next(iter(states.values())).sizes["ens"]
+    ens = next(iter(states.values()))._coords["ens"]
+
+    hx_full = torch.full((n_obs, n_members), float("nan"), 
+                         device=hxs[0].device, 
+                         dtype=torch.float64)
+
+    for hx, obs_idx in zip(hxs, obs_idxs):
+        if obs_idx is not None:
+            hx_full[obs_idx] = hx
+
+    obs = obs.assign_coords(ens=ens)
+    obs["hx"] = (("obs", "ens"), hx_full)
+    obs["hx_mean"] = obs["hx"].mean("ens")
+    return obs
+
+def populate_all_hx_sequentially(
       obs: Dataset,
       states: Mapping[int, Dataset],
       *,
@@ -143,28 +175,14 @@ def read_all_inov(
     """
     n_obs = obs.sizes["obs"]
     n_members = next(iter(states.values())).sizes["ens"]
+    ens = next(iter(states.values()))._coords["ens"]
+    
     hx_full = torch.full((n_obs, n_members), float("nan"), device=device, dtype=torch.float64)
     
     for tile_index, state_ds in tqdm(states.items()):
-        obs_tile = filter_obs_to_tile_index(obs, tile_index)
-        if obs_tile is None or obs_tile.sizes["obs"] == 0: continue
-        
-        state = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
-        
-        samples, _ = sample_state(
-          state.to(device),
-          state_ds["height"].to(device),
-          obs_tile["ri_local"],
-          obs_tile["rj_local"],
-          obs_tile["lev"],
-        )
-        
-        obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
-        hx = compute_all_hx(obs_state, obs_tile)
-        obs_indices = obs_tile["obs"].data.long()
+        hx, obs_indices = read_tile_hx(obs, state_ds, tile_index)
         hx_full[obs_indices] = hx
 
-    ens = next(iter(states.values()))._coords["ens"]
     obs = obs.assign_coords(ens=ens)
     obs["hx"] = (("obs", "ens"), hx_full)
     obs["hx_mean"] = obs["hx"].mean("ens")
