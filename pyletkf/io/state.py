@@ -300,28 +300,6 @@ def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallo
         dataset = strip_all_halos(dataset, raw.halo_map)
     return dataset
 
-
-def load_letkf_dump_state(
-    dump_dir: str | Path,
-    pe_tag: str,
-    dump_prefix: str,
-    *,
-    meta_prefix: str = "anal_f",
-    strip_hallow: bool = True,
-) -> Dataset:
-    """
-    Load a LETKF state by combining metadata from the NetCDF files with the
-    prognostic variables dumped under letkf_dump/<dump_prefix>.
-    """
-    base = load_letkf_state(dump_dir, pe_tag, meta_prefix, strip_hallow=strip_hallow)
-    dump_da = load_rank_members(dump_dir, dump_prefix, pe_tag)
-    state_np = dump_da.transpose("variable", "ens", "z", "y", "x").values
-    state_tensor = torch.as_tensor(state_np, dtype=torch.float64)
-    state_dt = DataTensor(state_tensor, base["state"].coords, base["state"].dims)
-    base["state"] = state_dt
-    return base
-
-
 def convert_letkf_to_scale(*_args, **_kwargs):
     raise NotImplementedError("convert_letkf_to_scale is not available without xarray.")
 
