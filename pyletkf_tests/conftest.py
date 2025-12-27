@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from pyletkf.io import load_letkf_state, load_radar
+from pyletkf.io import load_letkf_state, load_letkf_dump_state, load_radar
 from pyletkf.params import MEMBERS
 from pyletkf.pre_letkf import pre_letkf
 
@@ -39,7 +39,7 @@ def target_pe():
 
 @pytest.fixture(scope="session")
 def state_dataset(dump_root):
-    ds = load_letkf_state(dump_root, TARGET_PE, "anal_f", strip_hallow=True)
+    ds = load_letkf_dump_state(dump_root, TARGET_PE, "gues3d", strip_hallow=True)
     return ds.sel(ens=list(MEMBERS))
 
 
