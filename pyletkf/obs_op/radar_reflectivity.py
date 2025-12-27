@@ -5,11 +5,19 @@ MIN_RADAR_REF_DBZ = 10.0
 MIN_RADAR_REF = 10.0 ** (MIN_RADAR_REF_DBZ / 10.0)  # linear threshold = 10
 LOW_REF_SHIFT = -5.0
 RADAR_USE_MELT = False
+USE_T08_RS2014 = False
 
 def ref_operator(obs_state):
-    _, _, _, t, p, _, _, qr, _, qs, qg = obs_state
-    radar_lin = linear_reflectivity(qr, qs, qg, t, p,
-                                    use_melt=RADAR_USE_MELT)
+    _, _, _, temp, press, _, _, qr, _, qs, qg = obs_state
+    radar_lin = linear_reflectivity_method3(
+        qr,
+        qs,
+        qg,
+        temp,
+        press,
+        use_melt=RADAR_USE_MELT,
+        use_t08_rs2014=USE_T08_RS2014,
+    )
 
     hx = torch.full_like(radar_lin, MIN_RADAR_REF_DBZ + LOW_REF_SHIFT)
     min_ref_linear = 10.0 ** (MIN_RADAR_REF_DBZ / 10.0)
@@ -51,36 +59,49 @@ def _convert_raw_to_dbz(raw_values):
     dbz = torch.where(high_mask, high_values, dbz)
     return dbz
     
-def linear_reflectivity(
-        qr: torch.Tensor,
-        qs: torch.Tensor,
-        qg: torch.Tensor,
-        temp: torch.Tensor,
-        press: torch.Tensor,
-        *,
-        use_melt: bool,
-        qeps: float = 1.0e-20,
-    ) -> torch.Tensor:
-    ro = torch.clamp(press / (287.04 * temp), min=1.0e-12)
+def _mix_ratio_ratio(a: torch.Tensor, b: torch.Tensor, eps: float) -> torch.Tensor:
+    ratio = torch.zeros_like(a)
+    valid = (a > eps) & (b > eps)
+    safe = torch.minimum(a[valid] / b[valid], b[valid] / a[valid])
+    ratio[valid] = safe
+    return ratio
+
+def _safe_fraction(numer: torch.Tensor, denom: torch.Tensor, eps: float) -> torch.Tensor:
+    frac = torch.zeros_like(numer)
+    valid = (denom.abs() > eps)
+    frac[valid] = numer[valid] / denom[valid]
+    return frac
+
+def linear_reflectivity_method3(
+    qr: torch.Tensor,
+    qs: torch.Tensor,
+    qg: torch.Tensor,
+    temp: torch.Tensor,
+    press: torch.Tensor,
+    *,
+    use_melt: bool,
+    use_t08_rs2014: bool,
+    qeps: float = 1.0e-20,
+) -> torch.Tensor:
+    ro = press / (287.04 * temp)
+    maxf = 0.5
 
     if use_melt:
-        def _mix_ratio_ratio(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-            ratio = torch.zeros_like(a)
-            valid = (a > qeps) & (b > qeps)
-            ratio[valid] = torch.minimum(a[valid] / b[valid], b[valid] / a[valid])
-            return ratio
-
-        fg = 0.5 * torch.pow(_mix_ratio_ratio(qr, qg), 1.0 / 3.0)
-        fs = 0.5 * torch.pow(_mix_ratio_ratio(qr, qs), 1.0 / 3.0)
+        fg = maxf * torch.pow(_mix_ratio_ratio(qr, qg, qeps), 1.0 / 3.0)
+        fs = maxf * torch.pow(_mix_ratio_ratio(qr, qs, qeps), 1.0 / 3.0)
+        fwg = _safe_fraction(qr, qr + qg, qeps)
+        fws = _safe_fraction(qr, qr + qs, qeps)
     else:
         fg = torch.zeros_like(qr)
         fs = torch.zeros_like(qr)
+        fwg = torch.zeros_like(qr)
+        fws = torch.zeros_like(qr)
 
     qrp = torch.clamp((1.0 - fs - fg) * qr, min=0.0)
     qsp = torch.clamp((1.0 - fs) * qs, min=0.0)
     qgp = torch.clamp((1.0 - fg) * qg, min=0.0)
-    qms = fs * (qr + qs)
-    qmg = fg * (qr + qg)
+    qms = torch.clamp(fs * (qr + qs), min=0.0)
+    qmg = torch.clamp(fg * (qr + qg), min=0.0)
 
     def _z_term(coeff: float, exp: float, q: torch.Tensor) -> torch.Tensor:
         out = torch.zeros_like(q)
@@ -91,9 +112,6 @@ def linear_reflectivity(
     zr = _z_term(2.53e4, 1.84, qrp)
     zs = _z_term(3.48e3, 1.66, qsp)
     zg = _z_term(5.54e3, 1.70, qgp)
-
-    fws = qr / (qr + qs + qeps)
-    fwg = qr / (qr + qg + qeps)
 
     zms = torch.zeros_like(qms)
     mask_ms = qms > qeps
@@ -113,7 +131,7 @@ def linear_reflectivity(
         * 1.0e5
         * torch.pow(
             ro[mask_mg] * qmg[mask_mg] * 1.0e3,
-            1.70 + 0.02 * fwg[mask_mg] + 0.287 * fwg[mask_mg] ** 2 - 0.186 * fwg[mask_mg] ** 3,
+            1.70 + 0.020 * fwg[mask_mg] + 0.287 * fwg[mask_mg] ** 2 - 0.186 * fwg[mask_mg] ** 3,
         )
     )
 

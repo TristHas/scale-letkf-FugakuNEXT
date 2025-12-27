@@ -10,6 +10,8 @@ from netCDF4 import Dataset as NetCDFDataset
 
 from xtensor import DataTensor, Dataset
 
+from ..params import KHALO
+
 RDRY = 287.04
 CPDRY = 1004.64
 CVDry = CPDRY - RDRY
@@ -49,6 +51,7 @@ STATE_FIELD_SPECS: Mapping[str, Tuple[str, ...]] = {
     "QS": ("z", "y", "x"),
     "QG": ("z", "y", "x"),
     "height": ("z", "y", "x"),
+    "topo": ("y", "x"),
     "lon": ("y", "x"),
     "lat": ("y", "x"),
 }
@@ -76,9 +79,11 @@ class RawState:
     fyg: torch.Tensor
     cxg0: float
     cyg0: float
+    cz: torch.Tensor
+    fz: torch.Tensor
 
 
-def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tuple[float, ...]], Dict[str, Tuple[int, int]], torch.Tensor, torch.Tensor, float, float]:
+def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tuple[float, ...]], Dict[str, Tuple[int, int]], torch.Tensor, torch.Tensor, float, float, torch.Tensor, torch.Tensor]:
     arrays: Dict[str, torch.Tensor] = {}
     coords: Dict[str, Tuple[float, ...]] = {}
     halos: Dict[str, Tuple[int, int]] = {}
@@ -86,6 +91,8 @@ def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tu
     fyg = torch.tensor([])
     cxg0 = 0.0
     cyg0 = 0.0
+    cz_vals = torch.tensor([])
+    fz_vals = torch.tensor([])
 
     with NetCDFDataset(path) as ds:
         for name, target_dims in STATE_FIELD_SPECS.items():
@@ -108,7 +115,11 @@ def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tu
         fyg = torch.as_tensor(ds.variables["FYG"][:], dtype=torch.float64)
         cxg0 = float(torch.as_tensor(ds.variables["CXG"][:], dtype=torch.float64)[0])
         cyg0 = float(torch.as_tensor(ds.variables["CYG"][:], dtype=torch.float64)[0])
-    return arrays, coords, halos, fxg, fyg, cxg0, cyg0
+        if "CZ" in ds.variables:
+            cz_vals = torch.as_tensor(ds.variables["CZ"][:], dtype=torch.float64)
+        if "FZ" in ds.variables:
+            fz_vals = torch.as_tensor(ds.variables["FZ"][:], dtype=torch.float64)
+    return arrays, coords, halos, fxg, fyg, cxg0, cyg0, cz_vals, fz_vals
 
 
 def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f") -> RawState:
@@ -118,10 +129,11 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
     halo_map: Dict[str, Tuple[int, int]] | None = None
     fxg = fyg = None
     cxg0 = cyg0 = 0.0
+    cz = fz = None
     for mem in MEMBERS:
         fname = f"init_20210730-060030.000.{pe_tag}.nc"
         path = dump_dir / ".." / prefix / mem / fname
-        arrays, coords, halos, fxg_vals, fyg_vals, cx_val, cy_val = _read_member_file(path)
+        arrays, coords, halos, fxg_vals, fyg_vals, cx_val, cy_val, cz_vals, fz_vals = _read_member_file(path)
         for name, tensor in arrays.items():
             stacked[name].append(tensor)
         if base_coords is None:
@@ -133,14 +145,35 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
             fyg = fyg_vals
             cxg0 = cx_val
             cyg0 = cy_val
+        if cz is None:
+            cz = cz_vals
+        if fz is None:
+            fz = fz_vals
     data = {name: torch.stack(parts, dim=0) for name, parts in stacked.items()}
     assert base_coords is not None and halo_map is not None and fxg is not None and fyg is not None
-    return RawState(tuple(MEMBERS), data, base_coords, halo_map, fxg, fyg, cxg0, cyg0)
+    assert cz is not None and fz is not None
+    return RawState(tuple(MEMBERS), data, base_coords, halo_map, fxg, fyg, cxg0, cyg0, cz, fz)
 
 
 def _clean_tensor(tensor: torch.Tensor) -> torch.Tensor:
     mask = torch.abs(tensor - FILL) > 1.0e20
     return torch.where(mask, tensor, torch.full_like(tensor, float("nan")))
+
+def _compute_height_from_topo(
+    topo: torch.Tensor,
+    cz: torch.Tensor,
+    fz: torch.Tensor,
+    nlev: int,
+) -> torch.Tensor:
+    ks = 1 + KHALO
+    ke = ks + nlev - 1
+    ztop = fz[ke - 1] - fz[ks - 2]
+    cz_slice = cz[ks - 1 : ks - 1 + nlev]
+    scale = (ztop - topo) / ztop
+    heights: list[torch.Tensor] = []
+    for level_idx, cz_val in enumerate(cz_slice):
+        heights.append(scale * cz_val + topo)
+    return torch.stack(heights, dim=0)
 
 
 def convert_scale_to_letkf(raw: RawState) -> DataTensor:
@@ -230,13 +263,26 @@ def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallo
 
     lon = DataTensor(raw.data["lon"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
     lat = DataTensor(raw.data["lat"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
-    height = DataTensor(raw.data["height"][0], {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
+    topo_field = raw.data["topo"][0]
+    if "height" in raw.data and raw.data["height"].numel() > 0:
+        height_tensor = raw.data["height"][0]
+    else:
+        height_tensor = _compute_height_from_topo(topo_field, raw.cz, raw.fz, len(z_coords))
+    height = DataTensor(height_tensor, {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
+    topography = DataTensor(topo_field, {"y": y_coords, "x": x_coords}, ("y", "x"))
+    ks = 1 + KHALO
+    ke = ks + len(z_coords) - 1
+    ztop = raw.fz[ke - 1] - raw.fz[ks - 2]
+    cz_slice = raw.cz[ks - 1 : ks - 1 + len(z_coords)]
+    cz_levels = DataTensor(cz_slice, {"z": z_coords}, ("z",))
 
     data_vars = {
         "state": letkf_state,
         "lon": lon,
         "lat": lat,
         "height": height,
+        "topography": topography,
+        "cz_levels": cz_levels,
         "base_x": _scalar_tensor(base_x),
         "param_y": _scalar_tensor(param_y),
         "cxg0": _scalar_tensor(cxg0),
@@ -249,15 +295,35 @@ def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallo
         "y": y_coords,
         "x": x_coords,
     }
-    dataset = Dataset(data_vars, coords=coords, attrs={"halo_map": raw.halo_map})
+    dataset = Dataset(data_vars, coords=coords, attrs={"halo_map": raw.halo_map, "ztop": float(ztop)})
     if strip_hallow:
         dataset = strip_all_halos(dataset, raw.halo_map)
     return dataset
 
 
+def load_letkf_dump_state(
+    dump_dir: str | Path,
+    pe_tag: str,
+    dump_prefix: str,
+    *,
+    meta_prefix: str = "anal_f",
+    strip_hallow: bool = True,
+) -> Dataset:
+    """
+    Load a LETKF state by combining metadata from the NetCDF files with the
+    prognostic variables dumped under letkf_dump/<dump_prefix>.
+    """
+    base = load_letkf_state(dump_dir, pe_tag, meta_prefix, strip_hallow=strip_hallow)
+    dump_da = load_rank_members(dump_dir, dump_prefix, pe_tag)
+    state_np = dump_da.transpose("variable", "ens", "z", "y", "x").values
+    state_tensor = torch.as_tensor(state_np, dtype=torch.float64)
+    state_dt = DataTensor(state_tensor, base["state"].coords, base["state"].dims)
+    base["state"] = state_dt
+    return base
+
+
 def convert_letkf_to_scale(*_args, **_kwargs):
     raise NotImplementedError("convert_letkf_to_scale is not available without xarray.")
-
 
 def convert_letkf_scale_var(*_args, **_kwargs):
     raise NotImplementedError("convert_letkf_scale_var is not available without xarray.")

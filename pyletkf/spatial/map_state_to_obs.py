@@ -43,6 +43,19 @@ def _vertical_index_from_height(columns: torch.Tensor, lev: torch.Tensor) -> tup
     frac = torch.where(denom > 0.0, (lev - v0) / denom, torch.zeros_like(v0))
     return idx, frac
 
+def _bilinear_sample(field_yx: torch.Tensor, ix0, fx, iy0, fy) -> torch.Tensor:
+    ix1 = torch.clamp(ix0 + 1, 0, field_yx.shape[1] - 1)
+    iy1 = torch.clamp(iy0 + 1, 0, field_yx.shape[0] - 1)
+    #fx = fx.unsqueeze(1)
+    #fy = fy.unsqueeze(1)
+    f00 = field_yx[iy0, ix0]
+    f10 = field_yx[iy0, ix1]
+    f01 = field_yx[iy1, ix0]
+    f11 = field_yx[iy1, ix1]
+    f0 = f00 * (1.0 - fx) + f10 * fx
+    f1 = f01 * (1.0 - fx) + f11 * fx
+    return f0 * (1.0 - fy) + f1 * fy
+
 def _sample_cube(field5d, ix0, fx, iy0, fy, iz0, fz):
     ix1 = torch.clamp(ix0 + 1, 0, field5d.shape[1] - 1)
     iy1 = torch.clamp(iy0 + 1, 0, field5d.shape[0] - 1)
@@ -77,22 +90,27 @@ def sample_state(
     ri_local: DataTensor,
     rj_local: DataTensor,
     lev: DataTensor,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     state_cube = state.data  # (y, x, z, ens, var)
     height_tensor = height.data  # (z, y, x)
-    ri = ri_local.data.to(torch.float64)
-    rj = rj_local.data.to(torch.float64)
+    ri = ri_local.data.to(torch.float64) - 2.0
+    rj = rj_local.data.to(torch.float64) - 2.0
     lev_tensor = lev.data.to(torch.float64)
 
     ix0, fx = _fractional_index_unit(state_cube.shape[1], ri)
     iy0, fy = _fractional_index_unit(state_cube.shape[0], rj)
 
-    height_cols = _interpolate_height_columns(height_tensor, ix0, fx, iy0, fy)
-    iz0, fz = _vertical_index_from_height(height_cols, lev_tensor)
+    columns = _interpolate_height_columns(height_tensor, ix0, fx, iy0, fy)
+    min_valid_idx = min(KHALO, columns.shape[1] - 1)
+    min_height = columns[:, min_valid_idx]
+    max_height = columns[:, -1]
+    lev_clamped = torch.clamp(lev_tensor, min_height, max_height)
+    iz0, fz = _vertical_index_from_height(columns, lev_clamped)
 
     samples = _sample_cube(state_cube, ix0, fx, iy0, fy, iz0, fz)
     rk = iz0.to(torch.float64) + fz + KHALO
-    return samples, rk
+    valid_mask = (lev_tensor >= min_height) & (lev_tensor <= max_height)
+    return samples, rk, valid_mask
 
 def _subset_obs(obs: Dataset, mask: torch.Tensor) -> Dataset | None:
     indices = torch.nonzero(mask, as_tuple=False).squeeze(1)
@@ -111,7 +129,19 @@ def filter_obs_to_tile_index(obs: Dataset, tile_index: int) -> Dataset | None:
     rank_j = torch.floor((rj_global - 1.0) / NY_TILE).long()
 
     mask = (rank_i == target_i) & (rank_j == target_j)
-    return _subset_obs(obs, mask)
+    subset = _subset_obs(obs, mask)
+    if subset is None:
+        return None
+
+    ri_local = subset["ri_local"].data
+    rj_local = subset["rj_local"].data
+    interior = (
+        (ri_local >= 1.0 + IHALO)
+        & (ri_local <= NX_TILE - IHALO)
+        & (rj_local >= 1.0 + JHALO)
+        & (rj_local <= NY_TILE - JHALO)
+    )
+    return _subset_obs(subset, interior)
 
 def read_all_tile_hx_sequentially(obs, states):
     hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
@@ -127,17 +157,21 @@ def read_tile_hx(obs, state_ds, tile_index):
     
     state = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
     device = state.device
+    height = state_ds["height"]
     
-    samples, _ = sample_state(
-      state.to(device),
-      state_ds["height"].to(device),
-      obs_tile["ri_local"],
-      obs_tile["rj_local"],
-      obs_tile["lev"],
+    samples, _, valid_mask = sample_state(
+        state.to(device),
+        height.to(device),
+        obs_tile["ri_local"],
+        obs_tile["rj_local"],
+        obs_tile["lev"],
     )
     
     obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
     hx = compute_all_hx(obs_state, obs_tile)
+    invalid_mask = (~valid_mask).to(device=device)
+    if invalid_mask.any():
+        hx[invalid_mask] = 0.0
     obs_indices = obs_tile["obs"].data.long()
     return hx, obs_indices
 
