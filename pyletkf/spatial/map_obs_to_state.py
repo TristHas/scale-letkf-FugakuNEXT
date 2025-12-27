@@ -9,6 +9,10 @@ from ..params import (DX, DY, PRC_NUM_X, PRC_NUM_Y, NX_TILE, NY_TILE, DX, DY, TO
                       HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF, 
                       DIST_ZERO_FAC, MAX_OBS_PER_GRID)
 
+NN_CHUNK_SIZE = 1024
+MAX_DIST = 2000*DIST_ZERO_FAC
+CELL_SIZE = 2000
+
 def tile_bounds(tile_i: int, tile_j: int, halo_i: int = 0, halo_j: int = 0) -> tuple[float, float, float, float]:
     start_i = max(1.0, tile_i * NX_TILE + 1.0 - halo_i)
     end_i = min(TOTAL_NX, (tile_i + 1) * NX_TILE + halo_i)
@@ -62,19 +66,17 @@ def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset, pe_tag: str, 
         "horiz_len": horiz_len,
     }
 
+def chunked_topk_neighbors(coords):
+    
+    horiz_loc=HORI_LOCAL_RADAR_OBSNOREF
+    vert_loc=VERT_LOCAL_RADAR_OBSNOREF
+    dist_zero_fac=DIST_ZERO_FAC
+    max_obs_per_grid=MAX_OBS_PER_GRID
+    chunk_size = NN_CHUNK_SIZE
 
-def chunked_topk_neighbors(
-    grid_xy,
-    grid_z,
-    obs_xy,
-    obs_z,
-    *,
-    horiz_loc,
-    vert_loc,
-    dist_zero_fac,
-    max_obs_per_grid,
-    chunk_size,
-):
+    grid_xy, grid_z, obs_xy, obs_z = (coords["grid_xy"], coords["grid_z"], 
+                                      coords["obs_xy"],  coords["obs_z"])
+    
     device = grid_xy.device
     dtype = grid_xy.dtype
     topk_vals = []
@@ -102,12 +104,115 @@ def chunked_topk_neighbors(
         topk_vals.append(vals)
         topk_idx.append(idx)
         valid_masks.append(torch.isfinite(vals))
-    return {
-        "topk_vals": torch.cat(topk_vals, dim=0),
-        "topk_idx": torch.cat(topk_idx, dim=0),
-        "valid_mask": torch.cat(valid_masks, dim=0),
-    }
 
+    topk_vals = torch.cat(topk_vals, dim=0)
+    topk_idx  = torch.cat(topk_idx, dim=0)
+    valid_mask= torch.cat(valid_masks, dim=0)
+
+    return topk_vals, topk_idx, valid_mask
+
+def topk_quad(coords):
+    """
+    """
+    max_obs_per_grid=MAX_OBS_PER_GRID
+    max_dist = MAX_DIST
+    cell_size=CELL_SIZE
+    
+    n_cells = math.ceil(max_dist / cell_size)
+    
+    obs  = coords["obs_xy"]
+    obs_z = coords["obs_z"]
+    grid = coords["grid_xy"]
+    grid_z = coords["grid_z"]
+    
+    grid_quad = grid // cell_size
+    obs_quad  = obs // cell_size
+    
+    nobs = obs.shape[0]
+    ngrid = grid.shape[0]
+    
+    obs_idxs = torch.arange(nobs, device=obs.device)
+    grid_idxs = torch.arange(ngrid, device=obs.device)
+    
+    topk_idxs   = -torch.ones(ngrid, max_obs_per_grid, device=obs.device, dtype=torch.int64)
+    topk_vals   = torch.full((ngrid, max_obs_per_grid), float("inf"), device=obs.device, dtype=torch.float64)
+    zero_fac = DIST_ZERO_FAC
+    zero_fac_sq = zero_fac * zero_fac
+    horiz_loc = HORI_LOCAL_RADAR_OBSNOREF
+    vert_loc = VERT_LOCAL_RADAR_OBSNOREF
+    
+    for quad in grid_quad.unique(dim=0):
+        msk_obs = (obs_quad - quad).abs().max(1).values <= n_cells
+        lobs = obs[msk_obs]
+        nlobs = lobs.shape[0]
+        
+        if nlobs == 0:
+            continue
+
+        msk_grid = (grid_quad == quad).all(1)
+        lgrid = grid[msk_grid]
+        lgrid_z = grid_z[msk_grid]
+        lobs_z = obs_z[msk_obs]
+        
+        horiz = torch.cdist(lgrid, lobs) / horiz_loc
+        vert = torch.abs(lgrid_z.unsqueeze(1) - lobs_z) / vert_loc
+        ndist = horiz * horiz + vert * vert
+        
+        mask = (
+            (horiz <= zero_fac)
+            & (vert <= zero_fac)
+            & (ndist <= zero_fac_sq)
+        )
+        ndist = torch.where(mask, ndist, torch.full_like(ndist, float("inf")))
+        
+        k = min(max_obs_per_grid, nlobs)
+        if k == 0:
+            continue
+        vals, idx = torch.topk(ndist, k=k, dim=1, largest=False, sorted=True)
+        
+        lobs_idxs = obs_idxs[msk_obs][idx]
+        lgrid_idxs = grid_idxs[msk_grid]
+
+        topk_idxs[lgrid_idxs, :k] = lobs_idxs
+        topk_vals[lgrid_idxs, :k] = vals
+            
+    mask = ~torch.isinf(topk_vals)
+    return topk_vals, topk_idxs, mask
+
+TOPK_FUNC = {
+    "quad"    : topk_quad,
+    "chunked" : chunked_topk_neighbors,
+}
+
+def gather_obs(
+        state_ds: Dataset,
+        obs_valid: Dataset,
+        tile_index: int,
+        halo_i: int,
+        halo_j: int,
+        method = "quad",
+        *args,
+        **kwargs,
+    ):
+    """
+    """
+    obs_halo = filter_obs_to_haloed_tile(obs_valid, tile_index, 
+                                         halo_i=halo_i, halo_j=halo_j)
+    if obs_halo is None or obs_halo.sizes["obs"] == 0: return None
+
+    coords = extract_coordinate_tensors(state_ds, obs_halo, 
+                                        f"pe{tile_index:06d}", 
+                                        dtype=torch.float64)
+
+    topk_vals, topk_idx, valid_mask = TOPK_FUNC[method](coords)
+
+    assembled = assemble_cell_outputs(
+        topk_vals, topk_idx,
+        valid_mask, obs_halo,
+        var_local_factor=1.0,
+    )
+
+    return assembled
 
 def assemble_cell_outputs(
     topk_vals,
@@ -156,41 +261,3 @@ def format_to_dataset(hdxf, dep, rloc, rdiag, obs_mask, obs):
     dataset["rdiag_wloc"] = (("cell",), torch.ones_like(cell_dim).bool())
     dataset["infl_update"]= (("cell",), torch.ones_like(cell_dim).bool())
     return dataset
-
-def gather_obs(
-        state_ds: Dataset,
-        obs_valid: Dataset,
-        tile_index: int,
-        halo_i: int,
-        halo_j: int,
-        *,
-        chunk_size: int,
-    ):
-    """
-    """
-    obs_halo = filter_obs_to_haloed_tile(obs_valid, tile_index, 
-                                         halo_i=halo_i, halo_j=halo_j)
-    if obs_halo is None or obs_halo.sizes["obs"] == 0: return None
-
-    coords = extract_coordinate_tensors(state_ds, obs_halo, f"pe{tile_index:06d}", 
-                                        dtype=torch.float64)
-
-    topk = chunked_topk_neighbors(
-        coords["grid_xy"], coords["grid_z"],
-        coords["obs_xy"],  coords["obs_z"],
-        horiz_loc=HORI_LOCAL_RADAR_OBSNOREF,
-        vert_loc=VERT_LOCAL_RADAR_OBSNOREF,
-        dist_zero_fac=DIST_ZERO_FAC,
-        max_obs_per_grid=MAX_OBS_PER_GRID,
-        chunk_size=chunk_size,
-    )
-
-    assembled = assemble_cell_outputs(
-        topk["topk_vals"],
-        topk["topk_idx"],
-        topk["valid_mask"],
-        obs_halo,
-        var_local_factor=1.0,
-    )
-
-    return assembled

@@ -14,7 +14,7 @@ from .obs_op import filter_sc23_obs
 from .params import (HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF,
                      MAX_OBS_PER_GRID, DIST_ZERO_FAC, DX, DY, MEMBERS)
 
-def pre_letkf(obs, states, chunk_size=1024):
+def pre_letkf(obs, states, device=None):
     # Step 0: Populate obs with their grid indices
     obs = compute_obs_grid_idx(obs)
     device = obs["dat"].device
@@ -28,10 +28,10 @@ def pre_letkf(obs, states, chunk_size=1024):
     # Step 3: Populate each state cell with the nearest observation hx
     halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
     halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
-    results = { tile_index: gather_obs(state_ds.to(device), obs_valid, tile_index, 
-                                       halo_i, halo_j, chunk_size=chunk_size).cpu()\
+    results = { tile_index: gather_obs(state_ds.to(device), 
+                                       obs_valid, tile_index, 
+                                       halo_i, halo_j).cpu()\
                 for tile_index, state_ds in states.items()}
     
     return results
-
 
