@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import math
+from itertools import chain
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Sequence, Tuple
+from typing import Mapping, Sequence, Tuple
 
 import torch
-from netCDF4 import Dataset as NetCDFDataset
 
 from xtensor import DataTensor, Dataset
 
-from ..params import KHALO
+from ..params import IHALO, JHALO, KHALO, NX_TILE, NY_TILE, PRC_NUM_X, PRC_NUM_Y
+from .netcdf import read_and_concat_members
+from .utils import _normalize_pe_tag
 
 RDRY = 287.04
 CPDRY = 1004.64
@@ -35,134 +37,105 @@ BASE_LON = math.radians(BASE_LON_DEG)
 BASE_LAT = math.radians(BASE_LAT_DEG)
 FACT = math.cos(BASE_LAT)
 
-MEMBERS = ("0001", "0002") #, "mean")
-COORD_VARS = ("x", "y", "z", "xh", "yh", "zh")
-
-STATE_FIELD_SPECS: Mapping[str, Tuple[str, ...]] = {
-    "DENS": ("z", "y", "x"),
-    "RHOT": ("z", "y", "x"),
-    "MOMX": ("z", "y", "xh"),
-    "MOMY": ("z", "yh", "x"),
-    "MOMZ": ("zh", "y", "x"),
-    "QV": ("z", "y", "x"),
-    "QC": ("z", "y", "x"),
-    "QR": ("z", "y", "x"),
-    "QI": ("z", "y", "x"),
-    "QS": ("z", "y", "x"),
-    "QG": ("z", "y", "x"),
-    "height": ("z", "y", "x"),
-    "topo": ("y", "x"),
-    "lon": ("y", "x"),
-    "lat": ("y", "x"),
-}
-SHARED_STATE_VARS = {"lon", "lat", "topo", "height"}
-
-def _parse_halo(value: Iterable[int] | int) -> Tuple[int, int]:
-    if isinstance(value, Iterable) and not isinstance(value, (int, float)):
-        vals = tuple(int(v) for v in value)
-    else:
-        vals = (int(value),)
-    if len(vals) == 2:
-        return vals
-    if len(vals) == 1:
-        return (vals[0], 0)
-    return (0, 0)
-
-def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tuple[float, ...]], Dict[str, Tuple[int, int]], torch.Tensor, torch.Tensor, float, float, torch.Tensor, torch.Tensor]:
-    arrays: Dict[str, torch.Tensor] = {}
-    coords: Dict[str, Tuple[float, ...]] = {}
-    halos: Dict[str, Tuple[int, int]] = {}
-    fxg = torch.tensor([])
-    fyg = torch.tensor([])
-    cxg0 = 0.0
-    cyg0 = 0.0
-    cz_vals = torch.tensor([])
-    fz_vals = torch.tensor([])
-
-    with NetCDFDataset(path) as ds:
-        for name, target_dims in STATE_FIELD_SPECS.items():
-            var = ds.variables[name]
-            data = torch.as_tensor(var[:], dtype=torch.float64)
-            curr_dims = tuple(var.dimensions)
-            if curr_dims != target_dims:
-                perm = [curr_dims.index(dim) for dim in target_dims]
-                data = data.permute(*perm)
-            arrays[name] = data
-        for coord in COORD_VARS:
-            if coord not in ds.variables:
-                continue
-            var = ds.variables[coord]
-            tensor = torch.as_tensor(var[:], dtype=torch.float64)
-            coords[coord] = tuple(float(v) for v in tensor.tolist())
-            halo_attr = var.getncattr("halo_local") if "halo_local" in var.ncattrs() else (0, 0)
-            halos[coord] = _parse_halo(halo_attr)
-        fxg = torch.as_tensor(ds.variables["FXG"][:], dtype=torch.float64)
-        fyg = torch.as_tensor(ds.variables["FYG"][:], dtype=torch.float64)
-        cxg0 = float(torch.as_tensor(ds.variables["CXG"][:], dtype=torch.float64)[0])
-        cyg0 = float(torch.as_tensor(ds.variables["CYG"][:], dtype=torch.float64)[0])
-        if "CZ" in ds.variables:
-            cz_vals = torch.as_tensor(ds.variables["CZ"][:], dtype=torch.float64)
-        if "FZ" in ds.variables:
-            fz_vals = torch.as_tensor(ds.variables["FZ"][:], dtype=torch.float64)
-    return arrays, coords, halos, fxg, fyg, cxg0, cyg0, cz_vals, fz_vals
-
-
-def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f") -> Dataset:
-    dump_dir = Path(dump_dir)
-    stacked: Dict[str, list[torch.Tensor]] = {}
-    shared_vars: Dict[str, torch.Tensor] = {}
-    base_coords: Dict[str, Tuple[float, ...]] | None = None
-    halo_map: Dict[str, Tuple[int, int]] | None = None
-    fxg = fyg = None
-    cxg0 = cyg0 = 0.0
-    cz = fz = None
-    for mem in MEMBERS:
-        fname = f"init_20210730-060030.000.{pe_tag}.nc"
-        path = dump_dir / ".." / prefix / mem / fname
-        arrays, coords, halos, fxg_vals, fyg_vals, cx_val, cy_val, cz_vals, fz_vals = _read_member_file(path)
-        for name, tensor in arrays.items():
-            if name in SHARED_STATE_VARS:
-                shared_vars.setdefault(name, tensor)
-            else:
-                stacked.setdefault(name, []).append(tensor)
-        if base_coords is None:
-            base_coords = coords
-        if halo_map is None:
-            halo_map = halos
-        if fxg is None:
-            fxg = fxg_vals
-            fyg = fyg_vals
-            cxg0 = cx_val
-            cyg0 = cy_val
-        if cz is None:
-            cz = cz_vals
-        if fz is None:
-            fz = fz_vals
-    data_vars = {}
-    for name, tensors in stacked.items():
-        dims = ("ens",) + STATE_FIELD_SPECS[name]
-        data_vars[name] = (dims, torch.stack(tensors, dim=0))
-    for name, tensor in shared_vars.items():
-        data_vars[name] = (STATE_FIELD_SPECS[name], tensor)
-    assert base_coords is not None and halo_map is not None and fxg is not None and fyg is not None
-    assert cz is not None and fz is not None
-    coords = dict(base_coords)
-    coords["ens"] = tuple(MEMBERS)
-    attrs = {
-        "halo_map": halo_map,
-        "fxg": fxg,
-        "fyg": fyg,
-        "cxg0": cxg0,
-        "cyg0": cyg0,
-        "cz": cz,
-        "fz": fz,
-    }
-    return Dataset(data_vars, coords=coords, attrs=attrs)
 
 
 def _clean_tensor(tensor: torch.Tensor) -> torch.Tensor:
     mask = torch.abs(tensor - FILL) > 1.0e20
     return torch.where(mask, tensor, torch.full_like(tensor, float("nan")))
+
+
+def _build_dim_slices(x_slice: slice | None = None, y_slice: slice | None = None) -> Mapping[str, slice] | None:
+    dim_slices: dict[str, slice] = {}
+    if x_slice is not None:
+        dim_slices["x"] = x_slice
+        dim_slices["xh"] = x_slice
+    if y_slice is not None:
+        dim_slices["y"] = y_slice
+        dim_slices["yh"] = y_slice
+    return dim_slices or None
+
+
+def _tile_indices(pe_tag: str) -> tuple[int, int, int]:
+    pe_norm = _normalize_pe_tag(pe_tag)
+    idx = int(pe_norm[2:])
+    tile_i = idx % PRC_NUM_X
+    tile_j = idx // PRC_NUM_X
+    return idx, tile_i, tile_j
+
+
+def _tile_tag(tile_i: int, tile_j: int) -> str | None:
+    if 0 <= tile_i < PRC_NUM_X and 0 <= tile_j < PRC_NUM_Y:
+        idx = tile_j * PRC_NUM_X + tile_i
+        return f"pe{idx:06d}"
+    return None
+
+
+def _neighbor_dataset(
+    dump_dir: str | Path,
+    prefix: str,
+    tile_i: int,
+    tile_j: int,
+    dx: int,
+    dy: int,
+    *,
+    x_slice: slice | None = None,
+    y_slice: slice | None = None,
+) -> Dataset | None:
+    tag = _tile_tag(tile_i + dx, tile_j + dy)
+    if tag is None:
+        return None
+    dim_slices = _build_dim_slices(x_slice, y_slice)
+    return load_scale_state(dump_dir, tag, prefix, dim_slices=dim_slices)
+
+
+def _concat_row(blocks: Sequence[Dataset | None]) -> dict | None:
+    available = [block for block in blocks if block is not None]
+    if not available:
+        return None
+    tensors = [block["state"].values for block in blocks if block is not None]
+    state_row = torch.cat(tensors, dim=-1)
+    height_row = torch.cat([block["height"].values for block in blocks if block is not None], dim=-1)
+    lon_row = torch.cat([block["lon"].values for block in blocks if block is not None], dim=-1)
+    lat_row = torch.cat([block["lat"].values for block in blocks if block is not None], dim=-1)
+    topo_row = torch.cat([block["topo"].values for block in blocks if block is not None], dim=-1)
+    x_segments = [tuple(block.coords["x"]) for block in blocks if block is not None]
+    xh_segments = [tuple(block.coords.get("xh", block.coords["x"])) for block in blocks if block is not None]
+    y_coords = tuple(available[0].coords["y"])
+    yh_coords = tuple(available[0].coords.get("yh", available[0].coords["y"]))
+    return {
+        "state": state_row,
+        "height": height_row,
+        "lon": lon_row,
+        "lat": lat_row,
+        "topo": topo_row,
+        "x_segments": x_segments,
+        "xh_segments": xh_segments,
+        "y_coords": y_coords,
+        "yh_coords": yh_coords,
+    }
+
+
+def _assemble_rows(rows: Sequence[Sequence[Dataset | None]]) -> list[dict]:
+    assembled: list[dict] = []
+    for blocks in rows:
+        row = _concat_row(blocks)
+        if row is not None:
+            assembled.append(row)
+    return assembled
+
+
+def _flatten_segments(segments: Sequence[Sequence[float]]) -> Tuple[float, ...]:
+    return tuple(chain.from_iterable(segments))
+
+
+def _compute_extent(base_vals: Sequence[float], extended: Sequence[float]) -> tuple[int, int]:
+    base_list = list(base_vals)
+    extended_list = list(extended)
+    start = extended_list.index(base_list[0])
+    end = start + len(base_list)
+    left = start
+    right = len(extended_list) - end
+    return left, right
 
 
 def _replace_state(dataset: Dataset, new_state: DataTensor, variable_names: Sequence[str]) -> Dataset:
@@ -264,8 +237,8 @@ def compute_grid_params(scale_state: Dataset) -> tuple[float, float, float, floa
 def _scalar_tensor(value: float) -> DataTensor:
     return DataTensor(torch.as_tensor(value, dtype=torch.float64), {}, ())
 
-def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
-    scale_raw = read_and_concat_members(dump_dir, pe_tag, prefix)
+def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str, *, dim_slices: Mapping[str, slice] | None = None) -> Dataset:
+    scale_raw = read_and_concat_members(dump_dir, pe_tag, prefix, dim_slices=dim_slices)
     base_x, param_y, cxg0, cyg0 = compute_grid_params(scale_raw)
     y_coords = scale_raw.coords["y"]
     x_coords = scale_raw.coords["x"]
@@ -293,12 +266,7 @@ def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
     lon = scale_raw["lon"]
     lat = scale_raw["lat"]
     topo = scale_raw["topo"]
-    topo_field = topo.values
-    #if "height" in scale_raw.data_vars and scale_raw["height"].values.numel() > 0:
     height = scale_raw["height"]
-    #else:
-    #    height_tensor = _compute_height_from_topo(topo_field, scale_raw.attrs["cz"], scale_raw.attrs["fz"], len(z_coords))
-    #    height = DataTensor(height_tensor, {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
 
     ks = 1 + KHALO
     ke = ks + len(z_coords) - 1
@@ -333,8 +301,154 @@ def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
     return Dataset(data_vars, coords=coords, attrs=attrs)
 
 
+def load_haloed_scale_state(
+    dump_dir: str | Path,
+    pe_tag: str,
+    prefix: str,
+    halo_x: int = IHALO,
+    halo_y: int = JHALO,
+) -> Dataset:
+    base = load_scale_state(dump_dir, pe_tag, prefix)
+    halo_x = max(int(halo_x), 0)
+    halo_y = max(int(halo_y), 0)
+    if halo_x == 0 and halo_y == 0:
+        return base
+    _, tile_i, tile_j = _tile_indices(pe_tag)
+    return _apply_spatial_halos(dump_dir, prefix, base, tile_i, tile_j, halo_x, halo_y)
+
+
+def _apply_spatial_halos(
+    dump_dir: str | Path,
+    prefix: str,
+    base: Dataset,
+    tile_i: int,
+    tile_j: int,
+    halo_x: int,
+    halo_y: int,
+) -> Dataset:
+    nx = base["state"].sizes["x"]
+    ny = base["state"].sizes["y"]
+    halo_x = min(halo_x, nx)
+    halo_y = min(halo_y, ny)
+    left = halo_x if tile_i > 0 else 0
+    right = halo_x if tile_i < PRC_NUM_X - 1 else 0
+    top = halo_y if tile_j > 0 else 0
+    bottom = halo_y if tile_j < PRC_NUM_Y - 1 else 0
+    if left == 0 and right == 0 and top == 0 and bottom == 0:
+        return base
+
+    left_slice = slice(nx - left, nx) if left else None
+    right_slice = slice(0, right) if right else None
+    top_slice = slice(ny - top, ny) if top else None
+    bottom_slice = slice(0, bottom) if bottom else None
+
+    rows: list[list[Dataset | None]] = []
+    if top:
+        rows.append(
+            [
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, -1, x_slice=left_slice, y_slice=top_slice)
+                if left
+                else None,
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 0, -1, y_slice=top_slice),
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, -1, x_slice=right_slice, y_slice=top_slice)
+                if right
+                else None,
+            ]
+        )
+    rows.append(
+        [
+            _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, 0, x_slice=left_slice) if left else None,
+            base,
+            _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, 0, x_slice=right_slice) if right else None,
+        ]
+    )
+    if bottom:
+        rows.append(
+            [
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, 1, x_slice=left_slice, y_slice=bottom_slice)
+                if left
+                else None,
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 0, 1, y_slice=bottom_slice),
+                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, 1, x_slice=right_slice, y_slice=bottom_slice)
+                if right
+                else None,
+            ]
+        )
+
+    assembled_rows = _assemble_rows(rows)
+    if not assembled_rows:
+        return base
+
+    state_full = torch.cat([row["state"] for row in assembled_rows], dim=-2)
+    height_full = torch.cat([row["height"] for row in assembled_rows], dim=-2)
+    lon_full = torch.cat([row["lon"] for row in assembled_rows], dim=-2)
+    lat_full = torch.cat([row["lat"] for row in assembled_rows], dim=-2)
+    topo_full = torch.cat([row["topo"] for row in assembled_rows], dim=-2)
+
+    y_coords = tuple(chain.from_iterable(row["y_coords"] for row in assembled_rows))
+    yh_coords = tuple(chain.from_iterable(row["yh_coords"] for row in assembled_rows))
+    x_segments = next((row["x_segments"] for row in assembled_rows if row["x_segments"]), None)
+    if x_segments is None:
+        raise ValueError("Unable to determine x coordinates for halo assembly.")
+    new_x = _flatten_segments(x_segments)
+    xh_segments = next((row["xh_segments"] for row in assembled_rows if row["xh_segments"]), None)
+    new_xh = _flatten_segments(xh_segments) if xh_segments else new_x
+
+    variable_coords = tuple(base["state"].coords["variable"])
+    ens_coords = tuple(base.coords["ens"])
+    z_coords = tuple(base.coords["z"])
+
+    state_tensor = DataTensor(
+        state_full,
+        {
+            "variable": variable_coords,
+            "ens": ens_coords,
+            "z": z_coords,
+            "y": y_coords,
+            "x": new_x,
+        },
+        ("variable", "ens", "z", "y", "x"),
+    )
+    height_tensor = DataTensor(height_full, {"z": z_coords, "y": y_coords, "x": new_x}, ("z", "y", "x"))
+    lon_tensor = DataTensor(lon_full, {"y": y_coords, "x": new_x}, ("y", "x"))
+    lat_tensor = DataTensor(lat_full, {"y": y_coords, "x": new_x}, ("y", "x"))
+    topo_tensor = DataTensor(topo_full, {"y": y_coords, "x": new_x}, ("y", "x"))
+
+    base_x_coords = tuple(base.coords["x"])
+    base_y_coords = tuple(base.coords["y"])
+    left_extent, right_extent = _compute_extent(base_x_coords, new_x)
+    top_extent, bottom_extent = _compute_extent(base_y_coords, y_coords)
+
+    data_vars = dict(base.data_vars)
+    data_vars.update(
+        {
+            "state": state_tensor,
+            "height": height_tensor,
+            "lon": lon_tensor,
+            "lat": lat_tensor,
+            "topo": topo_tensor,
+        }
+    )
+    coords = dict(base.coords)
+    coords.update({"x": new_x, "y": y_coords, "xh": new_xh, "yh": yh_coords})
+    attrs = dict(base.attrs)
+    attrs["spatial_halo"] = {"x": (left_extent, right_extent), "y": (top_extent, bottom_extent)}
+    return Dataset(data_vars, coords=coords, attrs=attrs)
+
+
 def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
     scale_state = load_scale_state(dump_dir, pe_tag, prefix)
+    return convert_scale_to_letkf(scale_state)
+
+
+def load_haloed_letkf_state(
+    dump_dir: str | Path,
+    pe_tag: str,
+    prefix: str,
+    halo_x: int = IHALO,
+    halo_y: int = JHALO,
+) -> Dataset:
+    scale_state = load_haloed_scale_state(dump_dir, pe_tag, prefix, halo_x=halo_x, halo_y=halo_y)
     return convert_scale_to_letkf(scale_state)
 
 def convert_letkf_to_scale(dataset: Dataset) -> Dataset:
