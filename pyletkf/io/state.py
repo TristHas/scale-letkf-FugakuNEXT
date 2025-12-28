@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Sequence, Tuple
 
@@ -27,6 +26,7 @@ TRACER_SPECIES = ("QV", "QC", "QR", "QI", "QS", "QG")
 TRACER_CV = torch.tensor([CVVAP, CVVAP, CVVAP, CVVAP, CVVAP, CVVAP], dtype=torch.float64)
 
 CONTROL_ORDER = ("U", "V", "W", "T", "P", "QV", "QC", "QR", "QI", "QS", "QG")
+SCALE_STATE_ORDER = ("DENS", "RHOT", "MOMX", "MOMY", "MOMZ", "QV", "QC", "QR", "QI", "QS", "QG")
 
 RADIUS = 6_371_220.0
 BASE_LON_DEG = 139.609
@@ -35,7 +35,7 @@ BASE_LON = math.radians(BASE_LON_DEG)
 BASE_LAT = math.radians(BASE_LAT_DEG)
 FACT = math.cos(BASE_LAT)
 
-MEMBERS = ("0001", "0002", "mean")
+MEMBERS = ("0001", "0002") #, "mean")
 COORD_VARS = ("x", "y", "z", "xh", "yh", "zh")
 
 STATE_FIELD_SPECS: Mapping[str, Tuple[str, ...]] = {
@@ -55,7 +55,7 @@ STATE_FIELD_SPECS: Mapping[str, Tuple[str, ...]] = {
     "lon": ("y", "x"),
     "lat": ("y", "x"),
 }
-
+SHARED_STATE_VARS = {"lon", "lat", "topo", "height"}
 
 def _parse_halo(value: Iterable[int] | int) -> Tuple[int, int]:
     if isinstance(value, Iterable) and not isinstance(value, (int, float)):
@@ -67,21 +67,6 @@ def _parse_halo(value: Iterable[int] | int) -> Tuple[int, int]:
     if len(vals) == 1:
         return (vals[0], 0)
     return (0, 0)
-
-
-@dataclass
-class RawState:
-    members: Tuple[str, ...]
-    data: Dict[str, torch.Tensor]
-    coords: Dict[str, Tuple[float, ...]]
-    halo_map: Dict[str, Tuple[int, int]]
-    fxg: torch.Tensor
-    fyg: torch.Tensor
-    cxg0: float
-    cyg0: float
-    cz: torch.Tensor
-    fz: torch.Tensor
-
 
 def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tuple[float, ...]], Dict[str, Tuple[int, int]], torch.Tensor, torch.Tensor, float, float, torch.Tensor, torch.Tensor]:
     arrays: Dict[str, torch.Tensor] = {}
@@ -122,9 +107,10 @@ def _read_member_file(path: Path) -> tuple[Dict[str, torch.Tensor], Dict[str, Tu
     return arrays, coords, halos, fxg, fyg, cxg0, cyg0, cz_vals, fz_vals
 
 
-def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f") -> RawState:
+def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f") -> Dataset:
     dump_dir = Path(dump_dir)
-    stacked: Dict[str, list[torch.Tensor]] = {name: [] for name in STATE_FIELD_SPECS}
+    stacked: Dict[str, list[torch.Tensor]] = {}
+    shared_vars: Dict[str, torch.Tensor] = {}
     base_coords: Dict[str, Tuple[float, ...]] | None = None
     halo_map: Dict[str, Tuple[int, int]] | None = None
     fxg = fyg = None
@@ -135,7 +121,10 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
         path = dump_dir / ".." / prefix / mem / fname
         arrays, coords, halos, fxg_vals, fyg_vals, cx_val, cy_val, cz_vals, fz_vals = _read_member_file(path)
         for name, tensor in arrays.items():
-            stacked[name].append(tensor)
+            if name in SHARED_STATE_VARS:
+                shared_vars.setdefault(name, tensor)
+            else:
+                stacked.setdefault(name, []).append(tensor)
         if base_coords is None:
             base_coords = coords
         if halo_map is None:
@@ -149,15 +138,47 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
             cz = cz_vals
         if fz is None:
             fz = fz_vals
-    data = {name: torch.stack(parts, dim=0) for name, parts in stacked.items()}
+    data_vars = {}
+    for name, tensors in stacked.items():
+        dims = ("ens",) + STATE_FIELD_SPECS[name]
+        data_vars[name] = (dims, torch.stack(tensors, dim=0))
+    for name, tensor in shared_vars.items():
+        data_vars[name] = (STATE_FIELD_SPECS[name], tensor)
     assert base_coords is not None and halo_map is not None and fxg is not None and fyg is not None
     assert cz is not None and fz is not None
-    return RawState(tuple(MEMBERS), data, base_coords, halo_map, fxg, fyg, cxg0, cyg0, cz, fz)
+    coords = dict(base_coords)
+    coords["ens"] = tuple(MEMBERS)
+    attrs = {
+        "halo_map": halo_map,
+        "fxg": fxg,
+        "fyg": fyg,
+        "cxg0": cxg0,
+        "cyg0": cyg0,
+        "cz": cz,
+        "fz": fz,
+    }
+    return Dataset(data_vars, coords=coords, attrs=attrs)
 
 
 def _clean_tensor(tensor: torch.Tensor) -> torch.Tensor:
     mask = torch.abs(tensor - FILL) > 1.0e20
     return torch.where(mask, tensor, torch.full_like(tensor, float("nan")))
+
+
+def _replace_state(dataset: Dataset, new_state: DataTensor, variable_names: Sequence[str]) -> Dataset:
+    data_vars = dict(dataset.data_vars)
+    data_vars["state"] = new_state
+    coords = dict(dataset.coords)
+    coords["variable"] = tuple(variable_names)
+    return Dataset(data_vars, coords=coords, attrs=dataset.attrs)
+
+
+def _select_state_field(state: DataTensor, name: str) -> torch.Tensor:
+    try:
+        selected = state.sel(variable=name)
+    except KeyError as error:
+        raise KeyError(f"State variable '{name}' not found.") from error
+    return selected.values
 
 def _compute_height_from_topo(
     topo: torch.Tensor,
@@ -176,18 +197,21 @@ def _compute_height_from_topo(
     return torch.stack(heights, dim=0)
 
 
-def convert_scale_to_letkf(raw: RawState) -> DataTensor:
-    rho = _clean_tensor(raw.data["DENS"])
-    rhot = _clean_tensor(raw.data["RHOT"])
-    momx = _clean_tensor(raw.data["MOMX"])
-    momy = _clean_tensor(raw.data["MOMY"])
-    momz = _clean_tensor(raw.data["MOMZ"])[:, 1:, :, :]
+def convert_scale_to_letkf(scale_state: Dataset) -> Dataset:
+    if "state" not in scale_state.data_vars:
+        raise ValueError("scale_state dataset must include a 'state' variable.")
+    state = scale_state["state"]
+    rho = _clean_tensor(_select_state_field(state, "DENS"))
+    rhot = _clean_tensor(_select_state_field(state, "RHOT"))
+    momx = _clean_tensor(_select_state_field(state, "MOMX"))
+    momy = _clean_tensor(_select_state_field(state, "MOMY"))
+    momz = _clean_tensor(_select_state_field(state, "MOMZ"))
 
     u = momx / rho
     v = momy / rho
     w = momz / rho
 
-    moist = torch.stack([_clean_tensor(raw.data[name]) for name in TRACER_SPECIES], dim=0)
+    moist = torch.stack([_clean_tensor(_select_state_field(state, name)) for name in TRACER_SPECIES], dim=0)
     moist_cl = torch.nan_to_num(moist, nan=0.0)
     qdry = 1.0 - moist_cl.sum(dim=0)
 
@@ -216,31 +240,20 @@ def convert_scale_to_letkf(raw: RawState) -> DataTensor:
     )
     coords = {
         "variable": CONTROL_ORDER,
-        "ens": raw.members,
-        "z": raw.coords["z"],
-        "y": raw.coords["y"],
-        "x": raw.coords["x"],
+        "ens": scale_state.coords["ens"],
+        "z": scale_state.coords["z"],
+        "y": scale_state.coords["y"],
+        "x": scale_state.coords["x"],
     }
-    return DataTensor(control_stack, coords, ("variable", "ens", "z", "y", "x"))
+    control_tensor = DataTensor(control_stack, coords, ("variable", "ens", "z", "y", "x"))
+    return _replace_state(scale_state, control_tensor, CONTROL_ORDER)
 
 
-def strip_all_halos(ds: Dataset, halo_map: Dict[str, Tuple[int, int]] | None = None) -> Dataset:
-    halo = halo_map or ds.attrs.get("halo_map", {})
-    updated = {}
-    for name, var in ds.data_vars.items():
-        selectors = {}
-        for dim, (L, R) in halo.items():
-            if dim in var.dims and (L or R):
-                selectors[dim] = slice(L, None if R == 0 else -R)
-        updated[name] = var.isel(**selectors) if selectors else var
-    return Dataset(updated, attrs=ds.attrs)
-
-
-def compute_grid_params(raw: RawState) -> tuple[float, float, float, float]:
-    fxg = raw.fxg
-    fyg = raw.fyg
-    cxg0 = raw.cxg0
-    cyg0 = raw.cyg0
+def compute_grid_params(scale_state: Dataset) -> tuple[float, float, float, float]:
+    fxg = scale_state.attrs["fxg"]
+    fyg = scale_state.attrs["fyg"]
+    cxg0 = scale_state.attrs["cxg0"]
+    cyg0 = scale_state.attrs["cyg0"]
     base_x = float(0.5 * (fxg[0] + fxg[-1]))
     base_y = float(0.5 * (fyg[0] + fyg[-1]))
     latrot0 = 0.5 * math.pi - BASE_LAT
@@ -248,40 +261,57 @@ def compute_grid_params(raw: RawState) -> tuple[float, float, float, float]:
     param_y = base_y - RADIUS * FACT * math.log(dist0)
     return base_x, param_y, cxg0, cyg0
 
-
 def _scalar_tensor(value: float) -> DataTensor:
     return DataTensor(torch.as_tensor(value, dtype=torch.float64), {}, ())
 
+def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
+    scale_raw = read_and_concat_members(dump_dir, pe_tag, prefix)
+    base_x, param_y, cxg0, cyg0 = compute_grid_params(scale_raw)
+    y_coords = scale_raw.coords["y"]
+    x_coords = scale_raw.coords["x"]
+    z_coords = scale_raw.coords["z"]
+    state_arrays: list[torch.Tensor] = []
+    for name in SCALE_STATE_ORDER:
+        tensor = scale_raw[name].values
+        if name == "MOMZ":
+            tensor = tensor[:, 1:, :, :]
+        state_arrays.append(tensor)
 
-def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallow: bool = True) -> Dataset:
-    raw = read_and_concat_members(dump_dir, pe_tag, prefix)
-    letkf_state = convert_scale_to_letkf(raw)
-    base_x, param_y, cxg0, cyg0 = compute_grid_params(raw)
-    y_coords = raw.coords["y"]
-    x_coords = raw.coords["x"]
-    z_coords = raw.coords["z"]
+    state_stack = torch.stack(state_arrays, dim=0)
+    state_tensor = DataTensor(
+        state_stack,
+        {
+            "variable": SCALE_STATE_ORDER,
+            "ens": scale_raw.coords["ens"],
+            "z": z_coords,
+            "y": y_coords,
+            "x": x_coords,
+        },
+        ("variable", "ens", "z", "y", "x"),
+    )
 
-    lon = DataTensor(raw.data["lon"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
-    lat = DataTensor(raw.data["lat"][0], {"y": y_coords, "x": x_coords}, ("y", "x"))
-    topo_field = raw.data["topo"][0]
-    if "height" in raw.data and raw.data["height"].numel() > 0:
-        height_tensor = raw.data["height"][0]
-    else:
-        height_tensor = _compute_height_from_topo(topo_field, raw.cz, raw.fz, len(z_coords))
-    height = DataTensor(height_tensor, {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
-    topography = DataTensor(topo_field, {"y": y_coords, "x": x_coords}, ("y", "x"))
+    lon = scale_raw["lon"]
+    lat = scale_raw["lat"]
+    topo = scale_raw["topo"]
+    topo_field = topo.values
+    #if "height" in scale_raw.data_vars and scale_raw["height"].values.numel() > 0:
+    height = scale_raw["height"]
+    #else:
+    #    height_tensor = _compute_height_from_topo(topo_field, scale_raw.attrs["cz"], scale_raw.attrs["fz"], len(z_coords))
+    #    height = DataTensor(height_tensor, {"z": z_coords, "y": y_coords, "x": x_coords}, ("z", "y", "x"))
+
     ks = 1 + KHALO
     ke = ks + len(z_coords) - 1
-    ztop = raw.fz[ke - 1] - raw.fz[ks - 2]
-    cz_slice = raw.cz[ks - 1 : ks - 1 + len(z_coords)]
+    ztop = scale_raw.attrs["fz"][ke - 1] - scale_raw.attrs["fz"][ks - 2]
+    cz_slice = scale_raw.attrs["cz"][ks - 1 : ks - 1 + len(z_coords)]
     cz_levels = DataTensor(cz_slice, {"z": z_coords}, ("z",))
 
     data_vars = {
-        "state": letkf_state,
+        "state": state_tensor,
         "lon": lon,
         "lat": lat,
         "height": height,
-        "topography": topography,
+        "topo": topo,
         "cz_levels": cz_levels,
         "base_x": _scalar_tensor(base_x),
         "param_y": _scalar_tensor(param_y),
@@ -289,19 +319,87 @@ def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str, strip_hallo
         "cyg0": _scalar_tensor(cyg0),
     }
     coords = {
-        "variable": CONTROL_ORDER,
-        "ens": raw.members,
+        "variable": SCALE_STATE_ORDER,
+        "ens": scale_raw.coords["ens"],
         "z": z_coords,
         "y": y_coords,
         "x": x_coords,
+        "xh": scale_raw.coords.get("xh", x_coords),
+        "yh": scale_raw.coords.get("yh", y_coords),
+        "zh": scale_raw.coords.get("zh", tuple(range(len(z_coords) + 1))),
     }
-    dataset = Dataset(data_vars, coords=coords, attrs={"halo_map": raw.halo_map, "ztop": float(ztop)})
-    if strip_hallow:
-        dataset = strip_all_halos(dataset, raw.halo_map)
-    return dataset
+    attrs = dict(scale_raw.attrs)
+    attrs["ztop"] = float(ztop)
+    return Dataset(data_vars, coords=coords, attrs=attrs)
 
-def convert_letkf_to_scale(*_args, **_kwargs):
-    raise NotImplementedError("convert_letkf_to_scale is not available without xarray.")
 
-def convert_letkf_scale_var(*_args, **_kwargs):
-    raise NotImplementedError("convert_letkf_scale_var is not available without xarray.")
+def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:
+    scale_state = load_scale_state(dump_dir, pe_tag, prefix)
+    return convert_scale_to_letkf(scale_state)
+
+def convert_letkf_to_scale(dataset: Dataset) -> Dataset:
+    if "state" not in dataset.data_vars:
+        raise ValueError("Dataset must include a 'state' variable.")
+    control = dataset["state"]
+    if "variable" not in control.dims:
+        raise ValueError("Control DataTensor must include a 'variable' dimension.")
+
+    required_dims = ("variable", "ens", "z", "y", "x")
+    missing = [dim for dim in required_dims if dim not in control.dims]
+    if missing:
+        raise ValueError(f"Control tensor missing dimensions: {missing}")
+    if control.dims != required_dims:
+        control = control.transpose(*required_dims)
+
+    def _extract(name: str) -> torch.Tensor:
+        try:
+            return control.sel(variable=name).values
+        except KeyError as error:
+            raise KeyError(f"Control variable '{name}' not available.") from error
+
+    moist = torch.stack([_extract(name) for name in TRACER_SPECIES], dim=0)
+    moist_cl = torch.nan_to_num(moist, nan=0.0)
+    qdry = 1.0 - moist_cl.sum(dim=0)
+
+    tracer_cv = TRACER_CV.view(-1, 1, 1, 1, 1)
+    cv_tot = CVDry * qdry + (moist_cl * tracer_cv).sum(dim=0)
+    species_index = {name: idx for idx, name in enumerate(TRACER_SPECIES)}
+    rtot = RDRY * qdry + RVAP * moist_cl[species_index["QV"]]
+
+    pressure = _extract("P")
+    temperature = _extract("T")
+
+    rho = pressure / (rtot * temperature)
+    cvovcp = cv_tot / (cv_tot + rtot)
+    rhot = PRE00 / rtot * torch.pow(pressure / PRE00, cvovcp)
+
+    momx_mass = rho * _extract("U")
+    momy_mass = rho * _extract("V")
+    momz_mass = rho * _extract("W")
+
+    scale_stack = torch.stack(
+        [
+            rho,
+            rhot,
+            momx_mass,
+            momy_mass,
+            momz_mass,
+            moist[species_index["QV"]],
+            moist[species_index["QC"]],
+            moist[species_index["QR"]],
+            moist[species_index["QI"]],
+            moist[species_index["QS"]],
+            moist[species_index["QG"]],
+        ],
+        dim=0,
+    )
+
+    coords = {
+        "variable": SCALE_STATE_ORDER,
+        "ens": dataset.coords["ens"],
+        "z": dataset.coords["z"],
+        "y": dataset.coords["y"],
+        "x": dataset.coords["x"],
+    }
+    scale_tensor = DataTensor(scale_stack, coords, ("variable", "ens", "z", "y", "x"))
+    return _replace_state(dataset, scale_tensor, SCALE_STATE_ORDER)
