@@ -40,6 +40,7 @@ def _coord_tensor(values, device, dtype):
 def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset, pe_tag: str, *, dtype):
     state = state_ds["state"]
     device = state.device
+    
     y = _coord_tensor(state.coords["y"], device, torch.float64)
     x = _coord_tensor(state.coords["x"], device, torch.float64)
     z = _coord_tensor(state.coords["z"], device, torch.float64)
@@ -48,6 +49,7 @@ def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset, pe_tag: str, 
     grid_rj = yi.reshape(-1).repeat_interleave(len(z))
     grid_z = state_ds["height"].data.permute(1, 2, 0).reshape(-1).to(device=device, dtype=dtype)
     grid_xy = torch.stack((grid_ri, grid_rj), dim=1).to(device=device, dtype=dtype)
+    
     obs_xy = torch.stack(
         (
             obs_ds["ri_global"].data.to(device=device, dtype=dtype) * DX,
@@ -56,8 +58,8 @@ def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset, pe_tag: str, 
         dim=1,
     )
     obs_z = obs_ds["lev"].data.to(device=device, dtype=dtype)
-    grid_z = grid_z
     horiz_len = state.sizes["x"] * state.sizes["y"]
+    
     return {
         "grid_xy": grid_xy,
         "grid_z": grid_z,

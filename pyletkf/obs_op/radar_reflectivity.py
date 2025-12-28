@@ -82,7 +82,8 @@ def linear_reflectivity_method3(
     use_melt: bool,
     use_t08_rs2014: bool,
     qeps: float = 1.0e-20,
-) -> torch.Tensor:
+    return_terms: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     ro = press / (287.04 * temp)
     maxf = 0.5
 
@@ -139,4 +140,17 @@ def linear_reflectivity_method3(
         zms[:] = 0.0
         zmg[:] = 0.0
 
-    return zr + zs + zg + zms + zmg
+    radar_lin = zr + zs + zg + zms + zmg
+    if not return_terms:
+        return radar_lin
+    return radar_lin, {
+        "density": ro,
+        "zr": zr,
+        "zs": zs,
+        "zg": zg,
+        "zms": zms,
+        "zmg": zmg,
+        "qr": qr,
+        "qs": qs,
+        "qg": qg,
+    }
