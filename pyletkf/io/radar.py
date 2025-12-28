@@ -7,15 +7,10 @@ from pathlib import Path
 from typing import Dict
 
 import torch
-
 from xtensor import DataTensor, Dataset
 
 from ..obs_op import convert_raw_to_dbz
 
-ID_RADAR_REF = 4001  # reflectivity observations
-MIN_RADAR_REF_DBZ = 10.0  # from PARAM_LETKF_RADAR
-LOW_REF_SHIFT = -5.0
-MIN_RADAR_REF = 10.0 ** (MIN_RADAR_REF_DBZ / 10.0)  # linear threshold = 10
 DEFAULT_RADAR_PATH = Path("/home/tristan/workspace/scale_letkf/scale-letkf-FugakuNEXT/result/SC23/obs_radar/radar_20210730060030.dat")
 PHARAD_TYP = 22
 
