@@ -239,6 +239,7 @@ def _scalar_tensor(value: float) -> DataTensor:
 
 def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str, *, dim_slices: Mapping[str, slice] | None = None) -> Dataset:
     scale_raw = read_and_concat_members(dump_dir, pe_tag, prefix, dim_slices=dim_slices)
+    idx, tile_i, tile_j = _tile_indices(pe_tag)
     base_x, param_y, cxg0, cyg0 = compute_grid_params(scale_raw)
     y_coords = scale_raw.coords["y"]
     x_coords = scale_raw.coords["x"]
@@ -298,6 +299,9 @@ def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str, *, dim_slic
     }
     attrs = dict(scale_raw.attrs)
     attrs["ztop"] = float(ztop)
+    attrs["tile_index"] = idx
+    attrs["tile_i"] = tile_i
+    attrs["tile_j"] = tile_j
     return Dataset(data_vars, coords=coords, attrs=attrs)
 
 
@@ -450,6 +454,44 @@ def load_haloed_letkf_state(
 ) -> Dataset:
     scale_state = load_haloed_scale_state(dump_dir, pe_tag, prefix, halo_x=halo_x, halo_y=halo_y)
     return convert_scale_to_letkf(scale_state)
+
+
+def strip_state_halo(dataset: Dataset) -> Dataset:
+    halo_meta = dataset.attrs.get("spatial_halo")
+    if not halo_meta:
+        return dataset
+    left, right = halo_meta.get("x", (0, 0))
+    top, bottom = halo_meta.get("y", (0, 0))
+    left = int(left)
+    right = int(right)
+    top = int(top)
+    bottom = int(bottom)
+    if left == 0 and right == 0 and top == 0 and bottom == 0:
+        return dataset
+    x_size = dataset["state"].sizes["x"]
+    y_size = dataset["state"].sizes["y"]
+    x_slice = slice(left, x_size - right if right > 0 else x_size)
+    y_slice = slice(top, y_size - bottom if bottom > 0 else y_size)
+
+    def _isel_tensor(dt: DataTensor) -> DataTensor:
+        indexer: dict[str, slice] = {}
+        if "x" in dt.dims:
+            indexer["x"] = x_slice
+        if "y" in dt.dims:
+            indexer["y"] = y_slice
+        if not indexer:
+            return dt
+        return dt.isel(**indexer)
+
+    data_vars = {name: _isel_tensor(var) for name, var in dataset.data_vars.items()}
+    coords = dict(dataset.coords)
+    if "x" in coords:
+        coords["x"] = coords["x"][x_slice]
+    if "y" in coords:
+        coords["y"] = coords["y"][y_slice]
+    attrs = dict(dataset.attrs)
+    attrs["spatial_halo"] = {"x": (0, 0), "y": (0, 0)}
+    return Dataset(data_vars, coords=coords, attrs=attrs)
 
 def convert_letkf_to_scale(dataset: Dataset) -> Dataset:
     if "state" not in dataset.data_vars:
