@@ -170,6 +170,13 @@ def read_tile_hx(obs, state_ds, tile_index):
     """
     obs_tile = filter_obs_to_tile_index(obs, tile_index)
     if obs_tile is None or obs_tile.sizes["obs"] == 0: return (None, None)
+    halo_meta = state_ds.attrs.get("spatial_halo", {"x": (0, 0), "y": (0, 0)})
+    local_halo = state_ds.attrs.get("halo_map", {"x": (0, 0), "y": (0, 0)})
+    left = int(local_halo.get("x", (0, 0))[0]) + int(halo_meta.get("x", (0, 0))[0])
+    top = int(local_halo.get("y", (0, 0))[0]) + int(halo_meta.get("y", (0, 0))[0])
+    coords = {"obs": obs_tile.coords["obs"]}
+    ri_local = DataTensor(obs_tile["ri_local"].data + left, coords, ("obs",))
+    rj_local = DataTensor(obs_tile["rj_local"].data + top, coords, ("obs",))
     
     state = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
     device = state.device
@@ -178,8 +185,8 @@ def read_tile_hx(obs, state_ds, tile_index):
     samples, _, valid_mask = sample_state(
         state.to(device),
         height.to(device),
-        obs_tile["ri_local"],
-        obs_tile["rj_local"],
+        ri_local,
+        rj_local,
         obs_tile["lev"],
     )
     valid_mask = valid_mask & _radar_height_mask(obs_tile)
