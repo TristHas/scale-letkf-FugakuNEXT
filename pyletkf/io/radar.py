@@ -24,7 +24,6 @@ def _decode_order(data: bytes) -> str:
         return "<"
     return ">"
 
-
 def _tensor_from_bytes(data: bytes, order: str, code: str, dtype: torch.dtype) -> torch.Tensor:
     arr = array(code)
     arr.frombytes(data)
@@ -32,7 +31,6 @@ def _tensor_from_bytes(data: bytes, order: str, code: str, dtype: torch.dtype) -
     if order != native:
         arr.byteswap()
     return torch.tensor(arr, dtype=dtype)
-
 
 def _read_radar_dat(path: Path = DEFAULT_RADAR_PATH, byteorder: str | None = None) -> Dataset:
     path = Path(path)
@@ -89,15 +87,8 @@ def _read_radar_dat(path: Path = DEFAULT_RADAR_PATH, byteorder: str | None = Non
 def convert_radar_dbz(radar_obs: Dataset) -> Dataset:
     raw_tensor = radar_obs["dat"]
     converted = convert_raw_to_dbz(raw_tensor.data)
-    if torch.is_tensor(converted):
-        dat_tensor = DataTensor(converted, raw_tensor.coords, raw_tensor.dims)
-    else:
-        dat_tensor = DataTensor(torch.as_tensor(converted, dtype=torch.float64), raw_tensor.coords, raw_tensor.dims)
-    if torch.is_tensor(raw_tensor.data):
-        raw_copy = DataTensor(raw_tensor.data.clone(), raw_tensor.coords, raw_tensor.dims)
-    else:
-        raw_copy = DataTensor(torch.as_tensor(raw_tensor.values, dtype=torch.float64), raw_tensor.coords, raw_tensor.dims)
-    return radar_obs.assign(raw=raw_copy, dat=dat_tensor)
+    dat_tensor = DataTensor(converted, raw_tensor.coords, raw_tensor.dims)
+    return radar_obs.assign(raw=raw_tensor, dat=dat_tensor)
     
 def load_radar(path: Path = DEFAULT_RADAR_PATH) -> Dataset:
     ds = _read_radar_dat(path)
