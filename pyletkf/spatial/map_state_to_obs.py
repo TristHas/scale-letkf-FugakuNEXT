@@ -1,11 +1,11 @@
 from __future__ import annotations
 from typing import Mapping, Sequence
-import math
 from tqdm.auto import tqdm
 
 import torch
 from xtensor import DataTensor, Dataset
 
+from .grid_proj import filter_obs_to_tile
 from ..obs_op import compute_all_hx
 from ..obs_op.filter_obs import (
     ID_RADAR_REF,
@@ -14,16 +14,15 @@ from ..obs_op.filter_obs import (
     RADAR_ZMAX,
     RADAR_ZMIN,
 )
-from ..params import PRC_NUM_X, NX_TILE, NY_TILE, IHALO, JHALO, KHALO
+from ..params import DX, DY, KHALO, NX_TILE, NY_TILE
 
 def _fractional_index_unit(size: int, coord: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    coord0 = torch.clamp(coord - 1.0, 0.0, size - 1.0 - 1.0e-6)
-    lo = coord0.floor().long()
-    frac = coord0 - lo.to(coord0.dtype)
+    coord = coord - .5
+    lo = coord.floor().long()
+    frac = coord - lo.to(coord.dtype)
     return lo, frac
 
 def _interpolate_height_columns(height: torch.Tensor, ix0, fx, iy0, fy) -> torch.Tensor:
-    # height shape: (z, y, x) -> transpose to (y, x, z)
     height_yx = height.permute(1, 2, 0)
     ix1 = torch.clamp(ix0 + 1, 0, height_yx.shape[1] - 1)
     iy1 = torch.clamp(iy0 + 1, 0, height_yx.shape[0] - 1)
@@ -35,8 +34,8 @@ def _interpolate_height_columns(height: torch.Tensor, ix0, fx, iy0, fy) -> torch
     h10 = height_yx[iy0, ix1]
     h01 = height_yx[iy1, ix0]
     h11 = height_yx[iy1, ix1]
-    h0 = h00 * (1.0 - fx) + h10 * fx
-    h1 = h01 * (1.0 - fx) + h11 * fx
+    h0  = h00 * (1.0 - fx) + h10 * fx
+    h1  = h01 * (1.0 - fx) + h11 * fx
     return h0 * (1.0 - fy) + h1 * fy
 
 def _vertical_index_from_height(columns: torch.Tensor, lev: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -91,6 +90,16 @@ def _sample_cube(field5d, ix0, fx, iy0, fy, iz0, fz):
 
     return c0 * (1.0 - fz) + c1 * fz
 
+def _radar_height_mask(obs_tile: Dataset) -> torch.Tensor:
+    lev = obs_tile["lev"].data
+    elm = obs_tile["elm"].data
+    typ = obs_tile["typ"].data
+    is_radar = (typ == PHARAD_TYP) & ((elm == ID_RADAR_REF) | (elm == ID_RADAR_VR))
+    if not torch.any(is_radar):
+        return torch.ones_like(lev, dtype=torch.bool)
+    height_ok = (lev >= RADAR_ZMIN) & (lev <= RADAR_ZMAX)
+    return (~is_radar) | height_ok
+
 def sample_state(
     state: DataTensor,
     height: DataTensor,
@@ -100,13 +109,13 @@ def sample_state(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     state_cube = state.data  # (y, x, z, ens, var)
     height_tensor = height.data  # (z, y, x)
-    ri = ri_local.data.to(torch.float64) - 2.0
-    rj = rj_local.data.to(torch.float64) - 2.0
+    ri = ri_local.data.to(torch.float64) #- .5
+    rj = rj_local.data.to(torch.float64) #- .5
     lev_tensor = lev.data.to(torch.float64)
 
     ix0, fx = _fractional_index_unit(state_cube.shape[1], ri)
     iy0, fy = _fractional_index_unit(state_cube.shape[0], rj)
-
+ 
     columns = _interpolate_height_columns(height_tensor, ix0, fx, iy0, fy)
     min_height = columns[:, 0]
     max_height = columns[:, -1]
@@ -118,67 +127,39 @@ def sample_state(
     valid_mask = (lev_tensor >= min_height) & (lev_tensor <= max_height)
     return samples, rk, valid_mask
 
-def _subset_obs(obs: Dataset, mask: torch.Tensor) -> Dataset | None:
-    indices = torch.nonzero(mask, as_tuple=False).squeeze(1)
-    if indices.numel() == 0:
-        return None
-    return obs.isel(obs=indices)
+def compute_obs_local_coords(obs: Dataset, state_ds: Dataset) -> tuple[DataTensor, DataTensor]:
+    tile_i = int(state_ds.attrs.get("tile_i", 0))
+    tile_j = int(state_ds.attrs.get("tile_j", 0))
+    start_i = tile_i * NX_TILE
+    start_j = tile_j * NY_TILE
+    
+    ri_local = obs["ri_global"] - start_i 
+    rj_local = obs["rj_global"] - start_j 
 
-def filter_obs_to_tile_index(obs: Dataset, tile_index: int) -> Dataset | None:
-    target_i = tile_index % PRC_NUM_X
-    target_j = tile_index // PRC_NUM_X
+    ri_local, rj_local = apply_halo_to_obs_local_coords(state_ds, ri_local, rj_local)
 
-    ri_global = obs["ri_global"].data
-    rj_global = obs["rj_global"].data
+    return ri_local, rj_local
 
-    rank_i = torch.floor((ri_global - 1.0) / NX_TILE).long()
-    rank_j = torch.floor((rj_global - 1.0) / NY_TILE).long()
+def apply_halo_to_obs_local_coords(state_ds, ri_local, rj_local):
+    halo_meta  = state_ds.attrs.get("spatial_halo", {"x": (0, 0), "y": (0, 0)})
+    local_halo = state_ds.attrs.get("halo_map",     {"x": (0, 0), "y": (0, 0)})
+    left = int(local_halo.get("x", (0, 0))[0]) + int(halo_meta.get("x", (0, 0))[0])
+    top  = int(local_halo.get("y", (0, 0))[0]) + int(halo_meta.get("y", (0, 0))[0])
+    ri_local = ri_local + left
+    rj_local = rj_local + top
+    return ri_local, rj_local
 
-    mask = (rank_i == target_i) & (rank_j == target_j)
-    subset = _subset_obs(obs, mask)
-    if subset is None:
-        return None
-
-    ri_local = subset["ri_local"].data
-    rj_local = subset["rj_local"].data
-    interior = (
-        (ri_local >= 1.0 + IHALO)
-        & (ri_local <= NX_TILE - IHALO)
-        & (rj_local >= 1.0 + JHALO)
-        & (rj_local <= NY_TILE - JHALO)
-    )
-    return _subset_obs(subset, interior)
-
-def _radar_height_mask(obs_tile: Dataset) -> torch.Tensor:
-    lev = obs_tile["lev"].data
-    elm = obs_tile["elm"].data
-    typ = obs_tile["typ"].data
-    is_radar = (typ == PHARAD_TYP) & ((elm == ID_RADAR_REF) | (elm == ID_RADAR_VR))
-    if not torch.any(is_radar):
-        return torch.ones_like(lev, dtype=torch.bool)
-    height_ok = (lev >= RADAR_ZMIN) & (lev <= RADAR_ZMAX)
-    return (~is_radar) | height_ok
-
-def read_all_tile_hx_sequentially(obs, states):
-    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
-                        for tile_index, state_ds in tqdm(states.items())])
-    return hxs, obs_idxs
-
-def read_tile_hx(obs, state_ds, tile_index):
+    
+def read_tile_hx(obs, state_ds):
     """
         
     """
-    obs_tile = filter_obs_to_tile_index(obs, tile_index)
+    obs_tile = filter_obs_to_tile(obs, state_ds)
     if obs_tile is None or obs_tile.sizes["obs"] == 0: return (None, None)
-    halo_meta = state_ds.attrs.get("spatial_halo", {"x": (0, 0), "y": (0, 0)})
-    local_halo = state_ds.attrs.get("halo_map", {"x": (0, 0), "y": (0, 0)})
-    left = int(local_halo.get("x", (0, 0))[0]) + int(halo_meta.get("x", (0, 0))[0])
-    top = int(local_halo.get("y", (0, 0))[0]) + int(halo_meta.get("y", (0, 0))[0])
-    coords = {"obs": obs_tile.coords["obs"]}
-    ri_local = DataTensor(obs_tile["ri_local"].data + left, coords, ("obs",))
-    rj_local = DataTensor(obs_tile["rj_local"].data + top, coords, ("obs",))
-    
-    state = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
+
+    ri_local, rj_local = compute_obs_local_coords(obs, state_ds)
+     
+    state  = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
     device = state.device
     height = state_ds["height"]
     
@@ -192,21 +173,29 @@ def read_tile_hx(obs, state_ds, tile_index):
     valid_mask = valid_mask & _radar_height_mask(obs_tile)
     
     obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
+    
     hx = compute_all_hx(obs_state, obs_tile)
+    
     invalid_mask = (~valid_mask).to(device=device)
     if invalid_mask.any():
         hx[invalid_mask] = 0.0
+        
     obs_indices = obs_tile["obs"].data.long()
     return hx, obs_indices
 
+def read_all_tile_hx_sequentially(obs, states):
+    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
+                        for tile_index, state_ds in tqdm(states.items())])
+    return hxs, obs_idxs
+
 def assemble_all_hx(obs, states, hxs, obs_idxs):
     """
-    Build the full hx matrix (obs × members) by looping over tiles and
-    running the observation operator on the locally interpolated state.
+        Build the full hx matrix (obs × members) by looping over tiles and
+        running the observation operator on the locally interpolated state.
     """
     n_obs = obs.sizes["obs"]
     n_members = next(iter(states.values())).sizes["ens"]
-    ens = next(iter(states.values()))._coords["ens"]
+    ens = next(iter(states.values()))["ens"]
 
     hx_full = torch.full((n_obs, n_members), float("nan"), 
                          device=hxs[0].device, 
@@ -228,12 +217,12 @@ def populate_all_hx_sequentially(
       device: torch.device,
   ) -> torch.Tensor:
     """
-    Build the full hx matrix (obs × members) by looping over tiles and
-    running the observation operator on the locally interpolated state.
+        Build the full hx matrix (obs × members) by looping over tiles and
+        running the observation operator on the locally interpolated state.
     """
     n_obs = obs.sizes["obs"]
     n_members = next(iter(states.values())).sizes["ens"]
-    ens = next(iter(states.values()))._coords["ens"]
+    ens = next(iter(states.values()))["ens"]
     
     hx_full = torch.full((n_obs, n_members), float("nan"), device=device, dtype=torch.float64)
     

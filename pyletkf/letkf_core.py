@@ -32,11 +32,9 @@ def _default_coords(shape, dims, device):
         coords[dim] = torch.arange(shape[axis], dtype=torch.float64, device=device)
     return coords
 
-
 def _ensure_datatensor(value: torch.Tensor, dims: tuple[str, ...]) -> DataTensor:
     coords = _default_coords(value.shape, dims, value.device)
     return DataTensor(value, coords, dims)
-
 
 def _ensure_core_dataset(batch) -> Dataset:
     if isinstance(batch, Dataset):
@@ -53,10 +51,8 @@ def _ensure_core_dataset(batch) -> Dataset:
             coords[dim] = data_vars["hdxf"].coords[dim]
     return Dataset(data_vars, coords=coords)
 
-
 def _tensor(ds: Dataset, name: str) -> torch.Tensor:
     return ds[name].data
-
 
 def _dim_coords(dt: DataTensor, dim: str) -> torch.Tensor:
     coord = dt.coords.get(dim)
@@ -66,7 +62,6 @@ def _dim_coords(dt: DataTensor, dim: str) -> torch.Tensor:
     if isinstance(coord, torch.Tensor):
         return coord.to(dt.data.device)
     return torch.as_tensor(coord, dtype=torch.float64, device=dt.data.device)
-
 
 def letkf_core_torch(batch) -> Dataset:
     """Vectorised LETKF core following tools.letkf_core.letkf_core."""

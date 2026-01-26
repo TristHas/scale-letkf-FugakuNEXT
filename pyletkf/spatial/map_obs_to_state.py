@@ -5,7 +5,9 @@ from typing import Mapping, Optional
 import torch
 from xtensor import Dataset
 
-from ..params import (DX, DY, PRC_NUM_X, PRC_NUM_Y, NX_TILE, NY_TILE, DX, DY, TOTAL_NX, TOTAL_NY,
+from .grid_proj import tile_bounds
+
+from ..params import (DX, DY, PRC_NUM_X, PRC_NUM_Y, NX_TILE, NY_TILE, TOTAL_NX, TOTAL_NY,
                       HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF, 
                       DIST_ZERO_FAC, MAX_OBS_PER_GRID)
 
@@ -13,17 +15,8 @@ NN_CHUNK_SIZE = 1024
 MAX_DIST = 2000*DIST_ZERO_FAC
 CELL_SIZE = 2000
 
-def tile_bounds(tile_i: int, tile_j: int, halo_i: int = 0, halo_j: int = 0) -> tuple[float, float, float, float]:
-    start_i = max(1.0, tile_i * NX_TILE + 1.0 - halo_i)
-    end_i = min(TOTAL_NX, (tile_i + 1) * NX_TILE + halo_i)
-    start_j = max(1.0, tile_j * NY_TILE + 1.0 - halo_j)
-    end_j = min(TOTAL_NY, (tile_j + 1) * NY_TILE + halo_j)
-    return start_i, end_i, start_j, end_j
-
 def filter_obs_to_haloed_tile(obs: Dataset, tile_index: int, halo_i: int, halo_j: int) -> Dataset | None:
-    tile_i = tile_index % PRC_NUM_X
-    tile_j = tile_index // PRC_NUM_X
-    start_i, end_i, start_j, end_j = tile_bounds(tile_i, tile_j, halo_i=halo_i, halo_j=halo_j)
+    start_i, end_i, start_j, end_j = tile_bounds(tile_index, halo_i=halo_i, halo_j=halo_j)
     ri = obs["ri_global"].data
     rj = obs["rj_global"].data
     mask = (ri >= start_i) & (ri <= end_i) & (rj >= start_j) & (rj <= end_j)

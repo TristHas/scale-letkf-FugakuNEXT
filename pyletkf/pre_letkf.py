@@ -33,11 +33,10 @@ def pre_letkf(obs, states, device=None):
             for tile_index, state_ds in tqdm(states.items())
         ]
     )
-    
     obs = assemble_all_hx(obs, states, hxs, obs_idxs)
     # Step 2: Filter obs
     obs_valid = filter_sc23_obs(obs)
-    stripped_states = {tile_index: strip_state_halo(state_ds) for tile_index, state_ds in states.items()}
+    stripped_states = {tile_index: strip_state_halo(state_ds) for tile_index, state_ds in tqdm(states.items())}
     # Step 3: Populate each state cell with the nearest observation hx
     halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
     halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
@@ -48,8 +47,8 @@ def pre_letkf(obs, states, device=None):
             tile_index,
             halo_i,
             halo_j,
-        ).cpu()
-        for tile_index, state_ds in stripped_states.items()
+        ).to(device="cpu")
+        for tile_index, state_ds in tqdm(stripped_states.items())
     }
     
     return results

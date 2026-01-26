@@ -15,7 +15,7 @@ def test_filter_sc23_obs_matches_fortran(
     radar_dataset, state_dataset, dump_root, target_tile, target_pe
 ):
     obs = compute_obs_grid_idx(radar_dataset)
-    obs_tile = filter_obs_to_tile_index(obs, target_tile)
+    obs_tile = filter_obs_to_tile_index(obs, state_dataset)
     assert obs_tile is not None
 
     hx, _ = read_tile_hx(obs, state_dataset, target_tile)

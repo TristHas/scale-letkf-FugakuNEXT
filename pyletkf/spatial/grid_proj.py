@@ -5,8 +5,38 @@ from xtensor import Dataset, DataTensor
 from ..params import (RADIUS, FACT, BASE_LON,
                       DX, DY, GRID_PARAMS, 
                       NX_TILE, NY_TILE,
-                      IHALO, JHALO)
+                      IHALO, JHALO,
+                      PRC_NUM_X, PRC_NUM_Y,
+                      TOTAL_NX, TOTAL_NY)
 
+def tile_bounds(state_dataset, 
+                halo_i: int = 0, 
+                halo_j: int = 0) -> tuple[float, float, float, float]:
+    """
+    """
+    tile_i  = state_dataset.attrs["tile_i"]
+    tile_j  = state_dataset.attrs["tile_j"]
+    start_i = tile_i * NX_TILE - halo_i
+    end_i   = (tile_i + 1) * NX_TILE + halo_i
+    start_j = tile_j * NY_TILE - halo_j
+    end_j   = (tile_j + 1) * NY_TILE + halo_j
+    return start_i, end_i, start_j, end_j
+
+def filter_obs_to_tile(obs: Dataset, dataset_ds: Dataset) -> Dataset | None:
+    """
+    """
+    ri_min, ri_max, rj_min, rj_max = tile_bounds(dataset_ds)
+    ri_global = obs["ri_global"].data 
+    rj_global = obs["rj_global"].data
+    mask = (
+          (ri_global >= ri_min)
+        & (ri_global <= ri_max)
+        & (rj_global >= rj_min)
+        & (rj_global <= rj_max)
+    )
+    subset = obs.isel(obs=mask)
+    return subset
+    
 def _lonlat_to_grid_indices(
         lon_deg: torch.Tensor,
         lat_deg: torch.Tensor,
@@ -22,9 +52,9 @@ def _lonlat_to_grid_indices(
     latrot = 0.5 * math.pi - lat_rad
     dist = torch.reciprocal(torch.tan(0.5 * latrot))
     y = param_y + RADIUS * FACT * torch.log(dist)
-    ri = (x - cxg0) / DX + 1.0
-    rj = (y - cyg0) / DY + 1.0
-    return ri, rj
+    ri = (x - cxg0) / DX #+ 1.0
+    rj = (y - cyg0) / DY #+ 1.0
+    return ri-1.5, rj-1.5
 
 def populate_obs_global_indices(obs: Dataset, grid_params=GRID_PARAMS) -> Dataset:
     lon = obs["lon"].data
@@ -41,11 +71,10 @@ def populate_obs_global_indices(obs: Dataset, grid_params=GRID_PARAMS) -> Datase
                       rj_global=DataTensor(rj, obs["lat"].coords, ("obs",)))
 
 def populate_obs_local_idx(obs: Dataset) -> Dataset:
-    obs["ri_local"] = (("obs",), ((obs["ri_global"].values - 1) % NX_TILE) + 1)
-    obs["rj_local"] = (("obs",), ((obs["rj_global"].values - 1) % NY_TILE) + 1)
+    obs["ri_local"] = (("obs",), ((obs["ri_global"].values) % NX_TILE))
+    obs["rj_local"] = (("obs",), ((obs["rj_global"].values) % NY_TILE))
     return obs
 
 def compute_obs_grid_idx(obs: Dataset, grid_params=GRID_PARAMS) -> Dataset:
     obs = populate_obs_global_indices(obs, grid_params=grid_params)
-    obs = populate_obs_local_idx(obs)
     return obs
