@@ -88,6 +88,47 @@ def _neighbor_dataset(
     return load_scale_state(dump_dir, tag, prefix, dim_slices=dim_slices)
 
 
+def _tile_domain_halo(tile_i: int, tile_j: int) -> dict[str, tuple[int, int]]:
+    halo_x_left = IHALO if tile_i == 0 else 0
+    halo_x_right = IHALO if tile_i == PRC_NUM_X - 1 else 0
+    halo_y_top = JHALO if tile_j == 0 else 0
+    halo_y_bottom = JHALO if tile_j == PRC_NUM_Y - 1 else 0
+    return {
+        "x": (halo_x_left, halo_x_right),
+        "xh": (halo_x_left, halo_x_right),
+        "y": (halo_y_top, halo_y_bottom),
+        "yh": (halo_y_top, halo_y_bottom),
+    }
+
+
+def _axis_interior_bounds(tile_i: int, tile_j: int, axis: str) -> tuple[int, int]:
+    halo = _tile_domain_halo(tile_i, tile_j)[axis]
+    extent = NX_TILE if axis in ("x", "xh") else NY_TILE
+    start = halo[0]
+    end = start + extent
+    return start, end
+
+
+def _neighbor_axis_slice(
+    tile_i: int,
+    tile_j: int,
+    axis: str,
+    section: str,
+    width: int | None,
+) -> slice | None:
+    if section == "full":
+        start, end = _axis_interior_bounds(tile_i, tile_j, axis)
+        return slice(start, end)
+    if not width or width <= 0:
+        return None
+    start, end = _axis_interior_bounds(tile_i, tile_j, axis)
+    if section in ("left", "top"):
+        return slice(start, start + width)
+    if section in ("right", "bottom"):
+        return slice(end - width, end)
+    raise ValueError(f"Unsupported section '{section}' for axis '{axis}'")
+
+
 def _concat_row(blocks: Sequence[Dataset | None]) -> dict | None:
     available = [block for block in blocks if block is not None]
     if not available:
@@ -341,39 +382,110 @@ def _apply_spatial_halos(
     if left == 0 and right == 0 and top == 0 and bottom == 0:
         return base
 
-    left_slice = slice(nx - left, nx) if left else None
-    right_slice = slice(0, right) if right else None
-    top_slice = slice(ny - top, ny) if top else None
-    bottom_slice = slice(0, bottom) if bottom else None
-
     rows: list[list[Dataset | None]] = []
     if top:
         rows.append(
             [
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, -1, x_slice=left_slice, y_slice=top_slice)
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    -1,
+                    -1,
+                    x_slice=_neighbor_axis_slice(tile_i - 1, tile_j - 1, "x", "right", left),
+                    y_slice=_neighbor_axis_slice(tile_i - 1, tile_j - 1, "y", "bottom", top),
+                )
                 if left
                 else None,
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 0, -1, y_slice=top_slice),
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, -1, x_slice=right_slice, y_slice=top_slice)
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    0,
+                    -1,
+                    x_slice=_neighbor_axis_slice(tile_i, tile_j - 1, "x", "full", None),
+                    y_slice=_neighbor_axis_slice(tile_i, tile_j - 1, "y", "bottom", top),
+                ),
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    1,
+                    -1,
+                    x_slice=_neighbor_axis_slice(tile_i + 1, tile_j - 1, "x", "left", right),
+                    y_slice=_neighbor_axis_slice(tile_i + 1, tile_j - 1, "y", "bottom", top),
+                )
                 if right
                 else None,
             ]
         )
     rows.append(
         [
-            _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, 0, x_slice=left_slice) if left else None,
+            _neighbor_dataset(
+                dump_dir,
+                prefix,
+                tile_i,
+                tile_j,
+                -1,
+                0,
+                x_slice=_neighbor_axis_slice(tile_i - 1, tile_j, "x", "right", left),
+                y_slice=_neighbor_axis_slice(tile_i - 1, tile_j, "y", "full", None),
+            )
+            if left
+            else None,
             base,
-            _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, 0, x_slice=right_slice) if right else None,
+            _neighbor_dataset(
+                dump_dir,
+                prefix,
+                tile_i,
+                tile_j,
+                1,
+                0,
+                x_slice=_neighbor_axis_slice(tile_i + 1, tile_j, "x", "left", right),
+                y_slice=_neighbor_axis_slice(tile_i + 1, tile_j, "y", "full", None),
+            )
+            if right
+            else None,
         ]
     )
     if bottom:
         rows.append(
             [
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, -1, 1, x_slice=left_slice, y_slice=bottom_slice)
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    -1,
+                    1,
+                    x_slice=_neighbor_axis_slice(tile_i - 1, tile_j + 1, "x", "right", left),
+                    y_slice=_neighbor_axis_slice(tile_i - 1, tile_j + 1, "y", "top", bottom),
+                )
                 if left
                 else None,
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 0, 1, y_slice=bottom_slice),
-                _neighbor_dataset(dump_dir, prefix, tile_i, tile_j, 1, 1, x_slice=right_slice, y_slice=bottom_slice)
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    0,
+                    1,
+                    x_slice=_neighbor_axis_slice(tile_i, tile_j + 1, "x", "full", None),
+                    y_slice=_neighbor_axis_slice(tile_i, tile_j + 1, "y", "top", bottom),
+                ),
+                _neighbor_dataset(
+                    dump_dir,
+                    prefix,
+                    tile_i,
+                    tile_j,
+                    1,
+                    1,
+                    x_slice=_neighbor_axis_slice(tile_i + 1, tile_j + 1, "x", "left", right),
+                    y_slice=_neighbor_axis_slice(tile_i + 1, tile_j + 1, "y", "top", bottom),
+                )
                 if right
                 else None,
             ]
