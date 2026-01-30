@@ -4,21 +4,18 @@ import torch
 
 from pyletkf.io.letkf_dumps import load_obsda_sorted
 from pyletkf.obs_op import filter_sc23_obs
-from pyletkf.spatial.grid_proj import compute_obs_grid_idx
-from pyletkf.spatial.map_state_to_obs import (
-    filter_obs_to_tile_index,
-    read_tile_hx,
-)
+from pyletkf.spatial.grid_proj import compute_obs_grid_idx, filter_obs_to_tile
+from pyletkf.spatial.map_state_to_obs import read_tile_hx
 
 
 def test_filter_sc23_obs_matches_fortran(
     radar_dataset, state_dataset, dump_root, target_tile, target_pe
 ):
     obs = compute_obs_grid_idx(radar_dataset)
-    obs_tile = filter_obs_to_tile_index(obs, state_dataset)
-    assert obs_tile is not None
+    obs_tile = filter_obs_to_tile(obs, state_dataset)
+    assert obs_tile is not None and obs_tile.sizes["obs"] > 0
 
-    hx, _ = read_tile_hx(obs, state_dataset, target_tile)
+    hx, _ = read_tile_hx(obs_tile, state_dataset)
     assert hx is not None
     hx = hx.to(torch.float64)
     hx_mean = hx.mean(dim=1)
