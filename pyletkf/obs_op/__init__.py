@@ -5,14 +5,19 @@ from .radar_reflectivity import ref_operator, convert_raw_to_dbz
 from .radar_vr import vr_operator
 from .filter_obs import filter_sc23_obs
 
-ID_RADAR_VR = 4002
+ID_RADAR_VR  = 4002
 ID_RADAR_REF = 4001  # reflectivity observations
 
-def compute_all_hx(obs_state: torch.Tensor, obs_radar: Dataset) -> torch.Tensor:
+def compute_all_hx(obs_state: torch.Tensor, 
+                   obs_radar: Dataset) \
+                   -> torch.Tensor:
     device = obs_state.device
     dtype = obs_state.dtype
+    
     obs_type = obs_radar["elm"].data.to(device=device, dtype=torch.int64)
-    hx_out = torch.empty(obs_state.shape[1], obs_state.shape[2], device=device, dtype=dtype)
+    hx_out = torch.empty(obs_state.shape[1], 
+                         obs_state.shape[2], 
+                         device=device, dtype=dtype)
 
     mask_ref = obs_type == ID_RADAR_REF
     if mask_ref.any():

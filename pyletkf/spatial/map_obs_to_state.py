@@ -5,7 +5,7 @@ from typing import Mapping, Optional
 import torch
 from xtensor import Dataset
 
-from .grid_proj import tile_bounds
+from .grid_proj import filter_obs_to_tile
 
 from ..params import (DX, DY, PRC_NUM_X, PRC_NUM_Y, NX_TILE, NY_TILE, TOTAL_NX, TOTAL_NY,
                       HORI_LOCAL_RADAR_OBSNOREF, VERT_LOCAL_RADAR_OBSNOREF, 
@@ -15,42 +15,28 @@ NN_CHUNK_SIZE = 1024
 MAX_DIST = 2000*DIST_ZERO_FAC
 CELL_SIZE = 2000
 
-def filter_obs_to_haloed_tile(obs: Dataset, tile_index: int, halo_i: int, halo_j: int) -> Dataset | None:
-    start_i, end_i, start_j, end_j = tile_bounds(tile_index, halo_i=halo_i, halo_j=halo_j)
-    ri = obs["ri_global"].data
-    rj = obs["rj_global"].data
-    mask = (ri >= start_i) & (ri <= end_i) & (rj >= start_j) & (rj <= end_j)
-    indices = torch.nonzero(mask, as_tuple=False).squeeze(1)
-    if indices.numel() == 0:
-        return None
-    return obs.isel(obs=indices)
-
-def _coord_tensor(values, device, dtype):
-    if isinstance(values, torch.Tensor):
-        return values.to(device=device, dtype=dtype)
-    return torch.as_tensor(values, device=device, dtype=dtype)
-
-def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset, pe_tag: str, *, dtype):
+def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset):
     state = state_ds["state"]
     device = state.device
     
-    y = _coord_tensor(state.coords["y"], device, torch.float64)
-    x = _coord_tensor(state.coords["x"], device, torch.float64)
-    z = _coord_tensor(state.coords["z"], device, torch.float64)
+    y = state["y"].data.to(device)
+    x = state["x"].data.to(device)
+    z = state["z"].data.to(device)
+    
     xi, yi = torch.meshgrid(y, x, indexing="ij")
     grid_ri = xi.reshape(-1).repeat_interleave(len(z))
     grid_rj = yi.reshape(-1).repeat_interleave(len(z))
-    grid_z = state_ds["height"].data.permute(1, 2, 0).reshape(-1).to(device=device, dtype=dtype)
-    grid_xy = torch.stack((grid_ri, grid_rj), dim=1).to(device=device, dtype=dtype)
+    grid_z = state_ds["height"].data.permute(1, 2, 0).reshape(-1).to(device=device)
+    grid_xy = torch.stack((grid_ri, grid_rj), dim=1).to(device=device)
     
     obs_xy = torch.stack(
         (
-            obs_ds["ri_global"].data.to(device=device, dtype=dtype) * DX,
-            obs_ds["rj_global"].data.to(device=device, dtype=dtype) * DY,
+            obs_ds["ri_global"].data.to(device=device) * DX,
+            obs_ds["rj_global"].data.to(device=device) * DY,
         ),
         dim=1,
     )
-    obs_z = obs_ds["lev"].data.to(device=device, dtype=dtype)
+    obs_z = obs_ds["lev"].data.to(device=device)
     horiz_len = state.sizes["x"] * state.sizes["y"]
     
     return {
@@ -182,7 +168,6 @@ TOPK_FUNC = {
 def gather_obs(
         state_ds: Dataset,
         obs_valid: Dataset,
-        tile_index: int,
         halo_i: int,
         halo_j: int,
         method = "quad",
@@ -191,13 +176,12 @@ def gather_obs(
     ):
     """
     """
-    obs_halo = filter_obs_to_haloed_tile(obs_valid, tile_index, 
-                                         halo_i=halo_i, halo_j=halo_j)
+    obs_halo = filter_obs_to_tile(obs_valid, state_ds, 
+                                  halo_i=halo_i, 
+                                  halo_j=halo_j)
     if obs_halo is None or obs_halo.sizes["obs"] == 0: return None
 
-    coords = extract_coordinate_tensors(state_ds, obs_halo, 
-                                        f"pe{tile_index:06d}", 
-                                        dtype=torch.float64)
+    coords = extract_coordinate_tensors(state_ds, obs_halo)
 
     topk_vals, topk_idx, valid_mask = TOPK_FUNC[method](coords)
 

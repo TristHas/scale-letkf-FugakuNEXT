@@ -104,7 +104,7 @@ def postprocess_analysis_members(anal_members, params):
     sprd_ratio[positive_mask] = sprd[positive_mask] / safe_mean[positive_mask]
 
     limit_mask = (
-        (params["nvar"] == IV3D_Q)
+        (params["nvar"].values == IV3D_Q)
         & positive_mask
         & (Q_SPRD_MAX > 0.0)
         & (sprd_ratio > Q_SPRD_MAX)

@@ -101,13 +101,13 @@ def _radar_height_mask(obs_tile: Dataset) -> torch.Tensor:
     return (~is_radar) | height_ok
 
 def sample_state(
-    state: DataTensor,
-    height: DataTensor,
-    ri_local: DataTensor,
-    rj_local: DataTensor,
-    lev: DataTensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    state_cube = state.data  # (y, x, z, ens, var)
+        state: DataTensor,
+        height: DataTensor,
+        ri_local: DataTensor,
+        rj_local: DataTensor,
+        lev: DataTensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    state_cube = state.data      # (y, x, z, ens, var)
     height_tensor = height.data  # (z, y, x)
     ri = ri_local.data.to(torch.float64) #- .5
     rj = rj_local.data.to(torch.float64) #- .5
@@ -148,17 +148,17 @@ def apply_halo_to_obs_local_coords(state_ds, ri_local, rj_local):
     ri_local = ri_local + left
     rj_local = rj_local + top
     return ri_local, rj_local
-
     
 def read_tile_hx(obs, state_ds):
     """
         
     """
-    obs_tile = filter_obs_to_tile(obs, state_ds)
-    if obs_tile is None or obs_tile.sizes["obs"] == 0: return (None, None)
-
+    # This should be moved somewhere else
+    obs = filter_obs_to_tile(obs, state_ds)
+    if obs is None or obs.sizes["obs"] == 0: return (None, None)
+    
     ri_local, rj_local = compute_obs_local_coords(obs, state_ds)
-     
+    
     state  = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
     device = state.device
     height = state_ds["height"]
@@ -168,25 +168,27 @@ def read_tile_hx(obs, state_ds):
         height.to(device),
         ri_local,
         rj_local,
-        obs_tile["lev"],
+        obs["lev"],
     )
-    valid_mask = valid_mask & _radar_height_mask(obs_tile)
+    valid_mask = valid_mask & _radar_height_mask(obs)
     
     obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
-    
-    hx = compute_all_hx(obs_state, obs_tile)
+    hx = compute_all_hx(obs_state, obs)
     
     invalid_mask = (~valid_mask).to(device=device)
     if invalid_mask.any():
         hx[invalid_mask] = 0.0
-        
-    obs_indices = obs_tile["obs"].data.long()
-    return hx, obs_indices
-
+    
+    obs = obs.assign_coords(ens=state_ds["ens"])
+    obs["hx"]=(("obs", "ens"), hx)
+    obs["hx_mean"]=obs["hx"].mean("ens")
+    
+    return obs
+    
 def read_all_tile_hx_sequentially(obs, states):
-    hxs, obs_idxs = zip(*[read_tile_hx(obs, state_ds, tile_index) \
-                        for tile_index, state_ds in tqdm(states.items())])
-    return hxs, obs_idxs
+    obs = [read_tile_hx(obs, state_ds, tile_index) \
+            for tile_index, state_ds in tqdm(states.items())]
+    return obs
 
 def assemble_all_hx(obs, states, hxs, obs_idxs):
     """

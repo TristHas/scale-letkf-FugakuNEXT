@@ -15,7 +15,7 @@ def process_full_pipeline(tile_idx=0, device="cuda:1"):
     """
     #scale_var = [ 'DENS', 'MOMZ', 'MOMX', 'MOMY', 'RHOT', 'QV', 'QC', 'QR', 'QI', 'QS', 'QG']
     letkf_var = [ 'U', 'V', 'W', 'T', 'P', 'QV', 'QC', 'QR', 'QI', 'QS', 'QG']
-    n_tiles = PRC_NUM_X * PRC_NUM_Y
+    n_tiles  = PRC_NUM_X * PRC_NUM_Y
     dump_dir = Path("result/SC23/20210730060030/letkf_dump")
     
     pe_tag = f"pe{str(tile_idx).zfill(6)}"
@@ -29,9 +29,12 @@ def process_full_pipeline(tile_idx=0, device="cuda:1"):
 
     # Loop over the different tiles are done inside this function.
     da_state = pre_letkf(obs, states)
+    
     stripped_states = {pe: strip_state_halo(ds) for pe, ds in states.items()}
+    
     # Core solver step
     da_params = letkf_core(da_state[tile_idx])
+    
     # Format for applying the update step
     state = stripped_states[tile_idx]["state"].transpose("z", "y", "x", "ens", "variable").values.contiguous()
     

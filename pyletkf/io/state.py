@@ -262,7 +262,6 @@ def convert_scale_to_letkf(scale_state: Dataset) -> Dataset:
     control_tensor = DataTensor(control_stack, coords, ("variable", "ens", "z", "y", "x"))
     return _replace_state(scale_state, control_tensor, CONTROL_ORDER)
 
-
 def compute_grid_params(scale_state: Dataset) -> tuple[float, float, float, float]:
     fxg = scale_state.attrs["fxg"]
     fyg = scale_state.attrs["fyg"]

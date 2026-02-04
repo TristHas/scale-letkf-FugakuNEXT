@@ -22,10 +22,12 @@ def tile_bounds(state_dataset,
     end_j   = (tile_j + 1) * NY_TILE + halo_j
     return start_i, end_i, start_j, end_j
 
-def filter_obs_to_tile(obs: Dataset, dataset_ds: Dataset) -> Dataset | None:
+def filter_obs_to_tile(obs: Dataset, dataset_ds: Dataset,
+                      halo_i: int = 0, 
+                      halo_j: int = 0) -> Dataset | None:
     """
     """
-    ri_min, ri_max, rj_min, rj_max = tile_bounds(dataset_ds)
+    ri_min, ri_max, rj_min, rj_max = tile_bounds(dataset_ds, halo_i, halo_j)
     ri_global = obs["ri_global"].data 
     rj_global = obs["rj_global"].data
     mask = (

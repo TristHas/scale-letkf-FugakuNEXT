@@ -23,9 +23,11 @@ from .params import (
 from .io.state import strip_state_halo
 
 def pre_letkf(obs, states, device=None):
+    
     # Step 0: Populate obs with their grid indices
     obs = compute_obs_grid_idx(obs)
     device = obs["dat"].device
+    
     # Step 1: Populate observations with hx
     hxs, obs_idxs = zip(
         *[
@@ -34,12 +36,15 @@ def pre_letkf(obs, states, device=None):
         ]
     )
     obs = assemble_all_hx(obs, states, hxs, obs_idxs)
+    
     # Step 2: Filter obs
     obs_valid = filter_sc23_obs(obs)
     stripped_states = {tile_index: strip_state_halo(state_ds) for tile_index, state_ds in tqdm(states.items())}
+    
     # Step 3: Populate each state cell with the nearest observation hx
     halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
     halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
+    
     results = {
         tile_index: gather_obs(
             state_ds.to(device),
