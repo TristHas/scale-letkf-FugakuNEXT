@@ -25,22 +25,11 @@ def ref_operator(obs_state):
     hx[valid] = 10.0 * torch.log10(radar_lin[valid])
     return hx
 
-def convert_raw_to_dbz(raw):
-    """
-        Unified interface:
-        - If input is a NumPy array, returns a NumPy array.
-        - If input is a Torch tensor, returns a Torch tensor.
-        Internally dispatches to the torch implementation
-    """
-    if isinstance(raw, np.ndarray):
-        return _convert_raw_to_dbz(torch.from_numpy(raw)).numpy()
-    else:
-        return _convert_raw_to_dbz(raw)
 
-def _convert_raw_to_dbz(raw_values):
+def convert_raw_to_dbz(raw_values):
     """
     """
-    raw = raw_values.to(torch.float64)
+    raw = raw_values
     valid = (raw >= 0.0) & (raw < 1.0e10)
     dbz = torch.full_like(raw, float('nan'))
     # Step 2 — Low reflectivity threshold in *linear units*

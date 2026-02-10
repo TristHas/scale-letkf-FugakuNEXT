@@ -92,4 +92,7 @@ def convert_radar_dbz(radar_obs: Dataset) -> Dataset:
     
 def load_radar(path: Path = DEFAULT_RADAR_PATH) -> Dataset:
     ds = _read_radar_dat(path)
-    return convert_radar_dbz(ds)
+    ds = convert_radar_dbz(ds)
+    ds["obs"] = ds["obs"]-1
+    return ds
+

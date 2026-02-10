@@ -30,6 +30,65 @@ COORD_VARS = ("x", "y", "z", "xh", "yh", "zh")
 SHARED_STATE_VARS = {"lon", "lat", "topo", "height"}
 
 
+def _extend_axis(values: Tuple[float, ...], left: int, right: int) -> Tuple[float, ...]:
+    if (left <= 0 and right <= 0) or not values:
+        return values
+    seq = list(values)
+    if len(seq) == 1:
+        step_left = step_right = 0.0
+    else:
+        step_left = seq[1] - seq[0]
+        step_right = seq[-1] - seq[-2]
+    left_vals = [seq[0] - step_left * offset for offset in range(left, 0, -1)]
+    right_vals = [seq[-1] + step_right * offset for offset in range(1, right + 1)]
+    return tuple(left_vals + seq + right_vals)
+
+
+def _extend_coords(
+    coords: Dict[str, Tuple[float, ...]],
+    halo_i: int,
+    halo_j: int,
+) -> Dict[str, Tuple[float, ...]]:
+    extended = dict(coords)
+    if halo_i > 0:
+        if "x" in extended:
+            extended["x"] = _extend_axis(extended["x"], halo_i, halo_i)
+        if "xh" in extended:
+            extended["xh"] = _extend_axis(extended["xh"], halo_i, halo_i)
+    if halo_j > 0:
+        if "y" in extended:
+            extended["y"] = _extend_axis(extended["y"], halo_j, halo_j)
+        if "yh" in extended:
+            extended["yh"] = _extend_axis(extended["yh"], halo_j, halo_j)
+    return extended
+
+
+def _pad_tensor_with_nan(tensor: torch.Tensor, dims: Tuple[str, ...], halo_i: int, halo_j: int) -> torch.Tensor:
+    axis_padding: Dict[int, int] = {}
+    for axis, dim in enumerate(dims):
+        if dim in ("x", "xh"):
+            if halo_i > 0:
+                axis_padding[axis] = halo_i
+        elif dim in ("y", "yh"):
+            if halo_j > 0:
+                axis_padding[axis] = halo_j
+    if not axis_padding:
+        return tensor
+    new_shape = list(tensor.shape)
+    slices = [slice(None)] * tensor.ndim
+    for axis, pad in axis_padding.items():
+        new_shape[axis] += pad * 2
+        slices[axis] = slice(pad, pad + tensor.shape[axis])
+    filled = torch.full(
+        tuple(new_shape),
+        float("nan"),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    filled[tuple(slices)] = tensor
+    return filled
+
+
 def _parse_halo(value: Iterable[int] | int) -> Tuple[int, int]:
     if isinstance(value, Iterable) and not isinstance(value, (int, float)):
         vals = tuple(int(v) for v in value)
@@ -113,7 +172,15 @@ def _read_member_file(path: Path, dim_slices: Mapping[str, slice] | None = None)
     return arrays, coords, halos, fxg, fyg, cxg0, cyg0, cz_vals, fz_vals
 
 
-def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "anal_f", *, dim_slices: Mapping[str, slice] | None = None) -> "Dataset":
+def read_and_concat_members(
+    dump_dir: str | Path,
+    pe_tag: str,
+    prefix: str = "anal_f",
+    halo_i: int = 0,
+    halo_j: int = 0,
+    *,
+    dim_slices: Mapping[str, slice] | None = None,
+) -> "Dataset":
     from xtensor import Dataset  # local import to avoid circular
 
     dump_dir = Path(dump_dir)
@@ -147,6 +214,8 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
         if fz is None:
             fz = fz_vals
     data_vars = {}
+    halo_i = max(int(halo_i), 0)
+    halo_j = max(int(halo_j), 0)
     for name, tensors in stacked.items():
         dims = ("ens",) + STATE_FIELD_SPECS[name]
         data_vars[name] = (dims, torch.stack(tensors, dim=0))
@@ -156,6 +225,13 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
     assert cz is not None and fz is not None
     coords = dict(base_coords)
     coords["ens"] = tuple(MEMBERS)
+    if halo_i > 0 or halo_j > 0:
+        coords = _extend_coords(coords, halo_i, halo_j)
+        padded_vars: Dict[str, tuple[Tuple[str, ...], torch.Tensor]] = {}
+        for name, (dims, tensor) in data_vars.items():
+            padded = _pad_tensor_with_nan(tensor, dims, halo_i, halo_j)
+            padded_vars[name] = (dims, padded)
+        data_vars = padded_vars
     attrs = {
         "halo_map": halo_map,
         "fxg": fxg,
@@ -165,4 +241,6 @@ def read_and_concat_members(dump_dir: str | Path, pe_tag: str, prefix: str = "an
         "cz": cz,
         "fz": fz,
     }
+    if halo_i > 0 or halo_j > 0:
+        attrs["spatial_halo"] = {"x": (halo_i, halo_i), "y": (halo_j, halo_j)}
     return Dataset(data_vars, coords=coords, attrs=attrs)

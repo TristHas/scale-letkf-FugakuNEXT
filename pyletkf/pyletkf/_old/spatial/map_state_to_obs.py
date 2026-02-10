@@ -22,8 +22,7 @@ def _fractional_index_unit(size: int, coord: torch.Tensor) -> tuple[torch.Tensor
     frac = coord - lo.to(coord.dtype)
     return lo, frac
 
-def _interpolate_height_columns(height: torch.Tensor, ix0, fx, iy0, fy) -> torch.Tensor:
-    height_yx = height.permute(1, 2, 0)
+def _interpolate_height_columns(height_yx: torch.Tensor, ix0, fx, iy0, fy) -> torch.Tensor:
     ix1 = torch.clamp(ix0 + 1, 0, height_yx.shape[1] - 1)
     iy1 = torch.clamp(iy0 + 1, 0, height_yx.shape[0] - 1)
 
@@ -90,6 +89,29 @@ def _sample_cube(field5d, ix0, fx, iy0, fy, iz0, fz):
 
     return c0 * (1.0 - fz) + c1 * fz
 
+def sample_state(
+        state,   # (y, x, z, ens, var)
+        height,  # (z, y, x)
+        ri,
+        rj,
+        lev,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lev_tensor = lev.data.to(torch.float64)
+
+    ix0, fx = _fractional_index_unit(state.shape[1], ri)
+    iy0, fy = _fractional_index_unit(state.shape[0], rj)
+
+    columns = _interpolate_height_columns(height, ix0, fx, iy0, fy)
+    min_height = columns[:, 0]
+    max_height = columns[:, -1]
+    lev_clamped = torch.clamp(lev, min_height, max_height)
+    iz0, fz = _vertical_index_from_height(columns, lev_clamped)
+
+    samples = _sample_cube(state, ix0, fx, iy0, fy, iz0, fz)
+    rk = iz0.to(torch.float64) + fz + KHALO
+    valid_mask = (lev >= min_height) & (lev <= max_height)
+    return samples, rk, valid_mask
+
 def _radar_height_mask(obs_tile: Dataset) -> torch.Tensor:
     lev = obs_tile["lev"].data
     elm = obs_tile["elm"].data
@@ -99,33 +121,6 @@ def _radar_height_mask(obs_tile: Dataset) -> torch.Tensor:
         return torch.ones_like(lev, dtype=torch.bool)
     height_ok = (lev >= RADAR_ZMIN) & (lev <= RADAR_ZMAX)
     return (~is_radar) | height_ok
-
-def sample_state(
-        state: DataTensor,
-        height: DataTensor,
-        ri_local: DataTensor,
-        rj_local: DataTensor,
-        lev: DataTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    state_cube = state.data      # (y, x, z, ens, var)
-    height_tensor = height.data  # (z, y, x)
-    ri = ri_local.data.to(torch.float64) #- .5
-    rj = rj_local.data.to(torch.float64) #- .5
-    lev_tensor = lev.data.to(torch.float64)
-
-    ix0, fx = _fractional_index_unit(state_cube.shape[1], ri)
-    iy0, fy = _fractional_index_unit(state_cube.shape[0], rj)
- 
-    columns = _interpolate_height_columns(height_tensor, ix0, fx, iy0, fy)
-    min_height = columns[:, 0]
-    max_height = columns[:, -1]
-    lev_clamped = torch.clamp(lev_tensor, min_height, max_height)
-    iz0, fz = _vertical_index_from_height(columns, lev_clamped)
-
-    samples = _sample_cube(state_cube, ix0, fx, iy0, fy, iz0, fz)
-    rk = iz0.to(torch.float64) + fz + KHALO
-    valid_mask = (lev_tensor >= min_height) & (lev_tensor <= max_height)
-    return samples, rk, valid_mask
 
 def compute_obs_local_coords(obs: Dataset, state_ds: Dataset) -> tuple[DataTensor, DataTensor]:
     tile_i = int(state_ds.attrs.get("tile_i", 0))
@@ -156,7 +151,6 @@ def read_tile_hx(obs, state_ds):
     # This should be moved somewhere else
     obs = filter_obs_to_tile(obs, state_ds)
     if obs is None or obs.sizes["obs"] == 0: return (None, None)
-    
     ri_local, rj_local = compute_obs_local_coords(obs, state_ds)
     
     state  = state_ds["state"].transpose("y", "x", "z", "ens", "variable")
@@ -166,19 +160,17 @@ def read_tile_hx(obs, state_ds):
     samples, _, valid_mask = sample_state(
         state.to(device),
         height.to(device),
-        ri_local,
-        rj_local,
+        ri_local.values,
+        rj_local.values,
         obs["lev"],
     )
     valid_mask = valid_mask & _radar_height_mask(obs)
-    
     obs_state = samples.permute(2, 0, 1).to(device=device, dtype=torch.float64)
-    hx = compute_all_hx(obs_state, obs)
     
+    hx = compute_all_hx(obs_state, obs)
     invalid_mask = (~valid_mask).to(device=device)
     if invalid_mask.any():
         hx[invalid_mask] = 0.0
-    
     obs = obs.assign_coords(ens=state_ds["ens"])
     obs["hx"]=(("obs", "ens"), hx)
     obs["hx_mean"]=obs["hx"].mean("ens")

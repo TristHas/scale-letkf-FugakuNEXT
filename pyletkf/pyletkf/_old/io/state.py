@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from itertools import chain
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
 
@@ -37,7 +36,7 @@ BASE_LON = math.radians(BASE_LON_DEG)
 BASE_LAT = math.radians(BASE_LAT_DEG)
 FACT = math.cos(BASE_LAT)
 
-
+DUMP_DIR  = Path("result/SC23/20210730060030/letkf_dump")
 
 def _clean_tensor(tensor: torch.Tensor) -> torch.Tensor:
     mask = torch.abs(tensor - FILL) > 1.0e20
@@ -127,56 +126,6 @@ def _neighbor_axis_slice(
     if section in ("right", "bottom"):
         return slice(end - width, end)
     raise ValueError(f"Unsupported section '{section}' for axis '{axis}'")
-
-
-def _concat_row(blocks: Sequence[Dataset | None]) -> dict | None:
-    available = [block for block in blocks if block is not None]
-    if not available:
-        return None
-    tensors = [block["state"].values for block in blocks if block is not None]
-    state_row = torch.cat(tensors, dim=-1)
-    height_row = torch.cat([block["height"].values for block in blocks if block is not None], dim=-1)
-    lon_row = torch.cat([block["lon"].values for block in blocks if block is not None], dim=-1)
-    lat_row = torch.cat([block["lat"].values for block in blocks if block is not None], dim=-1)
-    topo_row = torch.cat([block["topo"].values for block in blocks if block is not None], dim=-1)
-    x_segments = [tuple(block.coords["x"]) for block in blocks if block is not None]
-    xh_segments = [tuple(block.coords.get("xh", block.coords["x"])) for block in blocks if block is not None]
-    y_coords = tuple(available[0].coords["y"])
-    yh_coords = tuple(available[0].coords.get("yh", available[0].coords["y"]))
-    return {
-        "state": state_row,
-        "height": height_row,
-        "lon": lon_row,
-        "lat": lat_row,
-        "topo": topo_row,
-        "x_segments": x_segments,
-        "xh_segments": xh_segments,
-        "y_coords": y_coords,
-        "yh_coords": yh_coords,
-    }
-
-
-def _assemble_rows(rows: Sequence[Sequence[Dataset | None]]) -> list[dict]:
-    assembled: list[dict] = []
-    for blocks in rows:
-        row = _concat_row(blocks)
-        if row is not None:
-            assembled.append(row)
-    return assembled
-
-
-def _flatten_segments(segments: Sequence[Sequence[float]]) -> Tuple[float, ...]:
-    return tuple(chain.from_iterable(segments))
-
-
-def _compute_extent(base_vals: Sequence[float], extended: Sequence[float]) -> tuple[int, int]:
-    base_list = list(base_vals)
-    extended_list = list(extended)
-    start = extended_list.index(base_list[0])
-    end = start + len(base_list)
-    left = start
-    right = len(extended_list) - end
-    return left, right
 
 
 def _replace_state(dataset: Dataset, new_state: DataTensor, variable_names: Sequence[str]) -> Dataset:
@@ -277,8 +226,24 @@ def compute_grid_params(scale_state: Dataset) -> tuple[float, float, float, floa
 def _scalar_tensor(value: float) -> DataTensor:
     return DataTensor(torch.as_tensor(value, dtype=torch.float64), {}, ())
 
-def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str, *, dim_slices: Mapping[str, slice] | None = None) -> Dataset:
-    scale_raw = read_and_concat_members(dump_dir, pe_tag, prefix, dim_slices=dim_slices)
+def load_scale_state(
+    tile_idx: int,
+    halo_i: int = 0,
+    halo_j: int = 0,
+    dump_dir = DUMP_DIR,
+    prefix: str = "anal_f",
+    *,
+    dim_slices: Mapping[str, slice] | None = None,
+) -> Dataset:        
+    pe_tag = f"pe{str(tile_idx).zfill(6)}"
+    scale_raw = read_and_concat_members(
+        dump_dir,
+        pe_tag,
+        prefix,
+        halo_i=halo_i,
+        halo_j=halo_j,
+        dim_slices=dim_slices,
+    )
     idx, tile_i, tile_j = _tile_indices(pe_tag)
     base_x, param_y, cxg0, cyg0 = compute_grid_params(scale_raw)
     y_coords = scale_raw.coords["y"]
@@ -342,6 +307,9 @@ def load_scale_state(dump_dir: str | Path, pe_tag: str, prefix: str, *, dim_slic
     attrs["tile_index"] = idx
     attrs["tile_i"] = tile_i
     attrs["tile_j"] = tile_j
+    attrs["dump_dir"] = str(dump_dir)
+    attrs["state_prefix"] = prefix
+    attrs["pe_tag"] = pe_tag
     return Dataset(data_vars, coords=coords, attrs=attrs)
 
 
@@ -352,203 +320,149 @@ def load_haloed_scale_state(
     halo_x: int = IHALO,
     halo_y: int = JHALO,
 ) -> Dataset:
-    base = load_scale_state(dump_dir, pe_tag, prefix)
     halo_x = max(int(halo_x), 0)
     halo_y = max(int(halo_y), 0)
+    base = load_scale_state(pe_tag, 
+                            halo_i=halo_x, halo_j=halo_y, 
+                            prefix=prefix, dump_dir=dump_dir)
     if halo_x == 0 and halo_y == 0:
         return base
-    _, tile_i, tile_j = _tile_indices(pe_tag)
-    return _apply_spatial_halos(dump_dir, prefix, base, tile_i, tile_j, halo_x, halo_y)
+    return read_tile_halos(base)
 
 
-def _apply_spatial_halos(
-    dump_dir: str | Path,
+def _assign_halo_block(target: Dataset, source: Dataset, x_slice: slice, y_slice: slice) -> None:
+    if x_slice is None or y_slice is None or source is None:
+        return
+    for name in ("state", "height", "lon", "lat", "topo"):
+        if name not in target.data_vars or name not in source.data_vars:
+            continue
+        target_tensor = target[name]
+        source_tensor = source[name]
+        indexer: list[slice] = []
+        for dim in target_tensor.dims:
+            if dim == "x":
+                indexer.append(x_slice)
+            elif dim == "y":
+                indexer.append(y_slice)
+            else:
+                indexer.append(slice(None))
+        target_tensor.values[tuple(indexer)] = source_tensor.values
+
+
+def _load_neighbor_block(
+    dump_dir: Path,
     prefix: str,
-    base: Dataset,
     tile_i: int,
     tile_j: int,
-    halo_x: int,
-    halo_y: int,
-) -> Dataset:
-    nx = base["state"].sizes["x"]
-    ny = base["state"].sizes["y"]
-    halo_x = min(halo_x, nx)
-    halo_y = min(halo_y, ny)
-    left = halo_x if tile_i > 0 else 0
-    right = halo_x if tile_i < PRC_NUM_X - 1 else 0
-    top = halo_y if tile_j > 0 else 0
-    bottom = halo_y if tile_j < PRC_NUM_Y - 1 else 0
-    if left == 0 and right == 0 and top == 0 and bottom == 0:
-        return base
-
-    rows: list[list[Dataset | None]] = []
-    if top:
-        rows.append(
-            [
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    -1,
-                    -1,
-                    x_slice=_neighbor_axis_slice(tile_i - 1, tile_j - 1, "x", "right", left),
-                    y_slice=_neighbor_axis_slice(tile_i - 1, tile_j - 1, "y", "bottom", top),
-                )
-                if left
-                else None,
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    0,
-                    -1,
-                    x_slice=_neighbor_axis_slice(tile_i, tile_j - 1, "x", "full", None),
-                    y_slice=_neighbor_axis_slice(tile_i, tile_j - 1, "y", "bottom", top),
-                ),
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    1,
-                    -1,
-                    x_slice=_neighbor_axis_slice(tile_i + 1, tile_j - 1, "x", "left", right),
-                    y_slice=_neighbor_axis_slice(tile_i + 1, tile_j - 1, "y", "bottom", top),
-                )
-                if right
-                else None,
-            ]
+    dx: int,
+    dy: int,
+    x_section: str,
+    x_width: int | None,
+    y_section: str,
+    y_width: int | None,
+) -> Dataset | None:
+    neighbor_i = tile_i + dx
+    neighbor_j = tile_j + dy
+    if _tile_tag(neighbor_i, neighbor_j) is None:
+        return None
+    x_slice = _neighbor_axis_slice(neighbor_i, neighbor_j, "x", x_section, x_width)
+    y_slice = _neighbor_axis_slice(neighbor_i, neighbor_j, "y", y_section, y_width)
+    try:
+        return _neighbor_dataset(
+            dump_dir,
+            prefix,
+            tile_i,
+            tile_j,
+            dx,
+            dy,
+            x_slice=x_slice,
+            y_slice=y_slice,
         )
-    rows.append(
-        [
-            _neighbor_dataset(
-                dump_dir,
-                prefix,
-                tile_i,
-                tile_j,
-                -1,
-                0,
-                x_slice=_neighbor_axis_slice(tile_i - 1, tile_j, "x", "right", left),
-                y_slice=_neighbor_axis_slice(tile_i - 1, tile_j, "y", "full", None),
-            )
-            if left
-            else None,
-            base,
-            _neighbor_dataset(
-                dump_dir,
-                prefix,
-                tile_i,
-                tile_j,
-                1,
-                0,
-                x_slice=_neighbor_axis_slice(tile_i + 1, tile_j, "x", "left", right),
-                y_slice=_neighbor_axis_slice(tile_i + 1, tile_j, "y", "full", None),
-            )
-            if right
-            else None,
-        ]
-    )
-    if bottom:
-        rows.append(
-            [
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    -1,
-                    1,
-                    x_slice=_neighbor_axis_slice(tile_i - 1, tile_j + 1, "x", "right", left),
-                    y_slice=_neighbor_axis_slice(tile_i - 1, tile_j + 1, "y", "top", bottom),
-                )
-                if left
-                else None,
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    0,
-                    1,
-                    x_slice=_neighbor_axis_slice(tile_i, tile_j + 1, "x", "full", None),
-                    y_slice=_neighbor_axis_slice(tile_i, tile_j + 1, "y", "top", bottom),
-                ),
-                _neighbor_dataset(
-                    dump_dir,
-                    prefix,
-                    tile_i,
-                    tile_j,
-                    1,
-                    1,
-                    x_slice=_neighbor_axis_slice(tile_i + 1, tile_j + 1, "x", "left", right),
-                    y_slice=_neighbor_axis_slice(tile_i + 1, tile_j + 1, "y", "top", bottom),
-                )
-                if right
-                else None,
-            ]
+    except FileNotFoundError:
+        return None
+
+
+def read_tile_halos(state: Dataset) -> Dataset:
+    halo_meta = state.attrs.get("spatial_halo")
+    if not halo_meta:
+        return state
+    halo_x = halo_meta.get("x", (0, 0))
+    halo_y = halo_meta.get("y", (0, 0))
+    left_total = max(int(halo_x[0]), 0)
+    right_total = max(int(halo_x[1]), 0)
+    top_total = max(int(halo_y[0]), 0)
+    bottom_total = max(int(halo_y[1]), 0)
+    if left_total == right_total == top_total == bottom_total == 0:
+        return state
+
+    try:
+        tile_i = int(state.attrs["tile_i"])
+        tile_j = int(state.attrs["tile_j"])
+    except KeyError as error:
+        raise ValueError("State dataset missing tile indices required for halo filling.") from error
+    dump_dir_attr = state.attrs.get("dump_dir")
+    prefix = state.attrs.get("state_prefix")
+    if dump_dir_attr is None or prefix is None:
+        raise ValueError("State dataset missing dump metadata required for halo filling.")
+    dump_dir = Path(dump_dir_attr)
+    prefix = str(prefix)
+
+    x_size = state["state"].sizes["x"]
+    y_size = state["state"].sizes["y"]
+    left_fill = min(left_total, x_size) if tile_i > 0 else 0
+    right_fill = min(right_total, x_size) if tile_i < PRC_NUM_X - 1 else 0
+    top_fill = min(top_total, y_size) if tile_j > 0 else 0
+    bottom_fill = min(bottom_total, y_size) if tile_j < PRC_NUM_Y - 1 else 0
+
+    def _make_slice(start: int, end: int) -> slice | None:
+        if end <= start:
+            return None
+        return slice(start, end)
+
+    x_left_slice = _make_slice(0, left_fill)
+    x_right_slice = _make_slice(x_size - right_fill, x_size)
+    y_top_slice = _make_slice(0, top_fill)
+    y_bottom_slice = _make_slice(y_size - bottom_fill, y_size)
+    x_center_slice = _make_slice(left_total, x_size - right_total)
+    y_center_slice = _make_slice(top_total, y_size - bottom_total)
+
+    operations = [
+        # Top row
+        (x_left_slice, y_top_slice, -1, -1, "right", left_fill, "bottom", top_fill),
+        (x_center_slice, y_top_slice, 0, -1, "full", None, "bottom", top_fill),
+        (x_right_slice, y_top_slice, 1, -1, "left", right_fill, "bottom", top_fill),
+        # Middle row
+        (x_left_slice, y_center_slice, -1, 0, "right", left_fill, "full", None),
+        (x_right_slice, y_center_slice, 1, 0, "left", right_fill, "full", None),
+        # Bottom row
+        (x_left_slice, y_bottom_slice, -1, 1, "right", left_fill, "top", bottom_fill),
+        (x_center_slice, y_bottom_slice, 0, 1, "full", None, "top", bottom_fill),
+        (x_right_slice, y_bottom_slice, 1, 1, "left", right_fill, "top", bottom_fill),
+    ]
+
+    for x_slice, y_slice, dx, dy, x_section, x_width, y_section, y_width in operations:
+        if x_slice is None or y_slice is None:
+            continue
+        if x_section != "full" and (x_width is None or x_width <= 0):
+            continue
+        if y_section != "full" and (y_width is None or y_width <= 0):
+            continue
+        neighbor = _load_neighbor_block(
+            dump_dir,
+            prefix,
+            tile_i,
+            tile_j,
+            dx,
+            dy,
+            x_section,
+            x_width,
+            y_section,
+            y_width,
         )
-
-    assembled_rows = _assemble_rows(rows)
-    if not assembled_rows:
-        return base
-
-    state_full = torch.cat([row["state"] for row in assembled_rows], dim=-2)
-    height_full = torch.cat([row["height"] for row in assembled_rows], dim=-2)
-    lon_full = torch.cat([row["lon"] for row in assembled_rows], dim=-2)
-    lat_full = torch.cat([row["lat"] for row in assembled_rows], dim=-2)
-    topo_full = torch.cat([row["topo"] for row in assembled_rows], dim=-2)
-
-    y_coords = tuple(chain.from_iterable(row["y_coords"] for row in assembled_rows))
-    yh_coords = tuple(chain.from_iterable(row["yh_coords"] for row in assembled_rows))
-    x_segments = next((row["x_segments"] for row in assembled_rows if row["x_segments"]), None)
-    if x_segments is None:
-        raise ValueError("Unable to determine x coordinates for halo assembly.")
-    new_x = _flatten_segments(x_segments)
-    xh_segments = next((row["xh_segments"] for row in assembled_rows if row["xh_segments"]), None)
-    new_xh = _flatten_segments(xh_segments) if xh_segments else new_x
-
-    variable_coords = tuple(base["state"].coords["variable"])
-    ens_coords = tuple(base.coords["ens"])
-    z_coords = tuple(base.coords["z"])
-
-    state_tensor = DataTensor(
-        state_full,
-        {
-            "variable": variable_coords,
-            "ens": ens_coords,
-            "z": z_coords,
-            "y": y_coords,
-            "x": new_x,
-        },
-        ("variable", "ens", "z", "y", "x"),
-    )
-    height_tensor = DataTensor(height_full, {"z": z_coords, "y": y_coords, "x": new_x}, ("z", "y", "x"))
-    lon_tensor = DataTensor(lon_full, {"y": y_coords, "x": new_x}, ("y", "x"))
-    lat_tensor = DataTensor(lat_full, {"y": y_coords, "x": new_x}, ("y", "x"))
-    topo_tensor = DataTensor(topo_full, {"y": y_coords, "x": new_x}, ("y", "x"))
-
-    base_x_coords = tuple(base.coords["x"])
-    base_y_coords = tuple(base.coords["y"])
-    left_extent, right_extent = _compute_extent(base_x_coords, new_x)
-    top_extent, bottom_extent = _compute_extent(base_y_coords, y_coords)
-
-    data_vars = dict(base.data_vars)
-    data_vars.update(
-        {
-            "state": state_tensor,
-            "height": height_tensor,
-            "lon": lon_tensor,
-            "lat": lat_tensor,
-            "topo": topo_tensor,
-        }
-    )
-    coords = dict(base.coords)
-    coords.update({"x": new_x, "y": y_coords, "xh": new_xh, "yh": yh_coords})
-    attrs = dict(base.attrs)
-    attrs["spatial_halo"] = {"x": (left_extent, right_extent), "y": (top_extent, bottom_extent)}
-    return Dataset(data_vars, coords=coords, attrs=attrs)
+        if neighbor is None:
+            continue
+        _assign_halo_block(state, neighbor, x_slice, y_slice)
+    return state
 
 
 def load_letkf_state(dump_dir: str | Path, pe_tag: str, prefix: str) -> Dataset:

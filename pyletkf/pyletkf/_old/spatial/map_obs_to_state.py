@@ -67,10 +67,11 @@ def chunked_topk_neighbors(coords):
         end = min(start + chunk_size, grid_xy.shape[0])
         chunk_xy = grid_xy[start:end]
         horiz = torch.cdist(chunk_xy, obs_xy) / horiz_loc
-        vert = torch.abs(grid_z[start:end].unsqueeze(1) - obs_z) / vert_loc
+        vert  = torch.abs(grid_z[start:end].unsqueeze(1) - obs_z) / vert_loc
         ndist = horiz * horiz + vert * vert
+        
         mask = (
-            (horiz <= dist_zero_fac)
+              (horiz <= dist_zero_fac)
             & (vert <= dist_zero_fac)
             & (ndist <= dist_zero_fac * dist_zero_fac)
         )
@@ -115,8 +116,10 @@ def topk_quad(coords):
     obs_idxs = torch.arange(nobs, device=obs.device)
     grid_idxs = torch.arange(ngrid, device=obs.device)
     
-    topk_idxs   = -torch.ones(ngrid, max_obs_per_grid, device=obs.device, dtype=torch.int64)
-    topk_vals   = torch.full((ngrid, max_obs_per_grid), float("inf"), device=obs.device, dtype=torch.float64)
+    topk_idxs   = -torch.ones(ngrid, max_obs_per_grid, 
+                              device=obs.device, dtype=torch.int64)
+    topk_vals   = torch.full((ngrid, max_obs_per_grid), float("inf"),
+                             device=obs.device, dtype=obs.dtype)
     zero_fac = DIST_ZERO_FAC
     zero_fac_sq = zero_fac * zero_fac
     horiz_loc = HORI_LOCAL_RADAR_OBSNOREF
@@ -193,6 +196,22 @@ def gather_obs(
 
     return assembled
 
+def map_obs_to_state(
+        state_ds: Dataset,
+        obs_valid: Dataset,
+        *args,
+        **kwargs
+    ):
+    device = obs_valid["dat"].device
+    halo_i = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DX)
+    halo_j = math.ceil(HORI_LOCAL_RADAR_OBSNOREF * DIST_ZERO_FAC / DY)
+    return gather_obs(
+            state_ds.to(device),
+            obs_valid,
+            halo_i,
+            halo_j,
+        )
+
 def assemble_cell_outputs(
     topk_vals,
     topk_idx,
@@ -231,12 +250,9 @@ def format_to_dataset(hdxf, dep, rloc, rdiag, obs_mask, obs):
     dataset = Dataset(coords={"cell":cell_dim, "obs":obs_dim, 
                               "ens":torch.arange(hdxf.shape[2], device=hdxf.device)})
     
-    dataset["hdxf"]=(("cell", "obs", "ens"), hdxf)
+    dataset["hdx"]=(("cell", "obs", "ens"), hdxf)
     dataset["dep"]=(("cell", "obs"), dep)
     dataset["rloc"]=(("cell", "obs"), rloc)
     dataset["rdiag"]=(("cell", "obs"), rdiag)
     dataset["obs_mask"]   = (("cell", "obs"), obs_mask)
-    dataset["parm_infl"]  = (("cell",), torch.ones_like(cell_dim))
-    dataset["rdiag_wloc"] = (("cell",), torch.ones_like(cell_dim).bool())
-    dataset["infl_update"]= (("cell",), torch.ones_like(cell_dim).bool())
     return dataset
