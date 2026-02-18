@@ -83,6 +83,7 @@ def load_das_stage(
     *,
     pe_tag: str | int = "pe000000",
     member: str | int = "mem0001",
+    return_meta = False
 ) -> dict[str, Any]:
     """Load metadata and arrays for a given stage/phase dump."""
 
@@ -90,9 +91,10 @@ def load_das_stage(
     pe_norm = _normalize_pe_tag(pe_tag)
     mem_norm = _normalize_member(member)
     call_tag = _format_call_id(call_id)
-    meta = _read_stage_metadata(phase_dir, call_tag, pe_norm, mem_norm)
-    arrays = _read_stage_arrays(phase_dir, call_tag, pe_norm, mem_norm, stage, phase)
-    return {"meta": meta, "data": arrays}
+    ret = {"data": _read_stage_arrays(phase_dir, call_tag, pe_norm, mem_norm, stage, phase)}
+    if return_meta:
+        ret["meta"]=_read_stage_metadata(phase_dir, call_tag, pe_norm, mem_norm)
+    return ret
 
 def load_das_obs_local_before(*args, **kwargs) -> dict[str, Any]:
     return load_das_stage(*args, stage="obs_local", phase="before", **kwargs)
