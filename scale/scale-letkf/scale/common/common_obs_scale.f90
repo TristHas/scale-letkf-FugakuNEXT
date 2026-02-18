@@ -37,6 +37,8 @@ MODULE common_obs_scale
   USE common
   USE common_nml
   USE common_scale
+  use common_mpi, only: myrank
+  use iso_fortran_env, only: error_unit
 
   IMPLICIT NONE
   PUBLIC
@@ -133,6 +135,22 @@ MODULE common_obs_scale
     INTEGER,ALLOCATABLE :: qc(:)
   END TYPE obs_da_value
 
+  type :: obsop_interp_dump_context
+    integer :: obs_set = -1
+    integer :: obs_idx = -1
+    integer :: elm = -1
+    integer :: typ = -1
+    character(len=16) :: stage = ''
+    integer :: rank_global = -1
+    integer :: rank_domain = -1
+    real(r_size) :: ri = 0.0_r_size
+    real(r_size) :: rj = 0.0_r_size
+    real(r_size) :: rk = 0.0_r_size
+    real(r_size) :: lon = 0.0_r_size
+    real(r_size) :: lat = 0.0_r_size
+    real(r_size) :: lev = 0.0_r_size
+  end type obsop_interp_dump_context
+
   character(obsformatlenmax), parameter :: obsfmt_prepbufr = 'PREPBUFR'
   character(obsformatlenmax), parameter :: obsfmt_radar    = 'RADAR'
   character(obsformatlenmax), parameter :: obsfmt_h08      = 'HIMAWARI8'
@@ -166,6 +184,10 @@ MODULE common_obs_scale
   real(r_size), allocatable, save :: obsdep_oma(:) ! 
   real(r_size), allocatable, save :: obsdep_sprd(:) ! 
   real(r_size), allocatable, save :: obsdep_omb_emean(:) ! 
+
+  logical :: obsop_interp_dump_ready = .false.
+  integer :: obsop_interp_dump_unit = -1
+  character(filelenmax) :: obsop_interp_dump_file = ''
 
   REAL(r_size),SAVE :: MIN_RADAR_REF
   REAL(r_size),SAVE :: RADAR_REF_THRES
@@ -268,7 +290,7 @@ end subroutine set_common_obs_scale
 !  0: non-staggered grid
 !  1: staggered grid
 !-----------------------------------------------------------------------
-SUBROUTINE Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,typ)
+SUBROUTINE Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,typ,dump_ctx)
   IMPLICIT NONE
   INTEGER,INTENT(IN) :: elm
   REAL(r_size),INTENT(IN) :: ri,rj,rk
@@ -279,7 +301,8 @@ SUBROUTINE Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,typ)
   REAL(r_size),INTENT(OUT) :: yobs
   INTEGER,INTENT(OUT) :: qc
   INTEGER,INTENT(IN),OPTIONAL :: stggrd
-  REAL(r_size) :: u,v,t,q,p,topo
+  type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
+  REAL(r_size) :: u,v,t,q,p,topo,psfc
 
   INTEGER :: stggrd_ = 0
   if (present(stggrd)) stggrd_ = stggrd
@@ -314,19 +337,25 @@ SUBROUTINE Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,typ)
     else
       yobs = v
     end if
+    call obsop_interp_dump_write(dump_ctx, 'uv', (/u, v/))
   CASE(id_t_obs)  ! T
     CALL itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,yobs)
+    call obsop_interp_dump_write(dump_ctx, 't', (/yobs/))
   CASE(id_tv_obs)  ! Tv
     CALL itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,yobs)
     CALL itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,q)
+    call obsop_interp_dump_write(dump_ctx, 'tv', (/yobs, q/))
     yobs = yobs * (1.0d0 + fvirt * q)
   CASE(id_q_obs)  ! Q
     CALL itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,yobs)
+    call obsop_interp_dump_write(dump_ctx, 'q', (/yobs/))
   CASE(id_ps_obs) ! PS
     CALL itpl_2d(v2d(:,:,iv2dd_t2m),ri,rj,t)
     CALL itpl_2d(v2d(:,:,iv2dd_q2m),ri,rj,q)
     CALL itpl_2d(v2d(:,:,iv2dd_topo),ri,rj,topo)
     CALL itpl_2d(v2d(:,:,iv2dd_ps),ri,rj,yobs)
+    psfc = yobs
+    call obsop_interp_dump_write(dump_ctx, 'ps', (/t, q, topo, psfc/))
     call prsadj(yobs,rk-topo,t,q)
     if (abs(rk-topo) > PS_ADJUST_THRES) then
       if (LOG_LEVEL >= 2) then
@@ -343,6 +372,7 @@ SUBROUTINE Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,typ)
     CALL itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,q)
     CALL itpl_3d(v3d(:,:,:,iv3dd_p),rk,ri,rj,p)
     CALL calc_rh(t,q,p,yobs) !!! RH in q/qs, not %
+    call obsop_interp_dump_write(dump_ctx, 'rh', (/t, q, p, yobs/))
 !  CASE(id_tclon_obs)
 !    CALL tctrk(v2d(:,:,iv2d_ps),v2d(:,:,iv2d_t2),ri,rj,dummy)
 !    yobs = dummy(1)
@@ -368,7 +398,7 @@ END SUBROUTINE Trans_XtoY
 ! 
 !-----------------------------------------------------------------------
 SUBROUTINE Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev,v3d,v2d,yobs,qc,stggrd,&
-                            mv3d,slope3d,ref_add,use_shift)
+                            mv3d,slope3d,ref_add,use_shift,dump_ctx)
   use scale_atmos_grid_cartesC_index, only: &
       KHALO
   IMPLICIT NONE
@@ -384,6 +414,7 @@ SUBROUTINE Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev
   real(r_size), intent(in), optional :: slope3d(nlevh,nv3dd)
   real(r_size), intent(out), optional :: ref_add
   logical, intent(in), optional :: use_shift
+  type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
   INTEGER :: stggrd_ = 0
 
   REAL(r_size) :: qvr,qcr,qrr,qir,qsr,qgr,ur,vr,wr,tr,pr !,rhr
@@ -427,6 +458,7 @@ SUBROUTINE Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev
   CALL itpl_3d(v3d(:,:,:,iv3dd_qi),rk,ri,rj,qir)
   CALL itpl_3d(v3d(:,:,:,iv3dd_qs),rk,ri,rj,qsr)
   CALL itpl_3d(v3d(:,:,:,iv3dd_qg),rk,ri,rj,qgr)
+  call obsop_interp_dump_write(dump_ctx, 'radar_state', (/ur, vr, wr, tr, pr, qvr, qcr, qrr, qir, qsr, qgr/))
 !
 
 
@@ -547,6 +579,69 @@ SUBROUTINE Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev
 
   RETURN
 END SUBROUTINE Trans_XtoY_radar
+
+subroutine obsop_interp_dump_initialize()
+  character(len=filelenmax) :: dir
+  character(len=filelenmax) :: fname
+  integer :: istat
+
+  if (.not. OBSOP_INTERP_DUMP) return
+  if (obsop_interp_dump_ready) return
+
+  dir = trim(adjustl(OBSOP_INTERP_DUMP_DIR))
+  if (len_trim(dir) == 0) dir = 'obs_interp_dump'
+  call execute_command_line('mkdir -p "'//trim(dir)//'"', wait=.true., exitstat=istat)
+  if (istat /= 0) then
+    write(error_unit,'(A,1X,A,1X,I0)') 'obsop_interp_dump: failed to create directory', trim(dir), istat
+    return
+  end if
+
+  write(fname,'(A,"/obs_interp_rank",I6.6,".dat")') trim(dir), myrank
+  open(newunit=obsop_interp_dump_unit, file=trim(fname), status='replace', action='write', iostat=istat)
+  if (istat /= 0) then
+    write(error_unit,'(A,1X,A,1X,I0)') 'obsop_interp_dump: failed to open file', trim(fname), istat
+    obsop_interp_dump_unit = -1
+    return
+  end if
+
+  obsop_interp_dump_ready = .true.
+  obsop_interp_dump_file = trim(fname)
+  write(obsop_interp_dump_unit,'(A)') '# set idx elm typ stage rank_global rank_local ri rj rk lon lat lev label values...'
+end subroutine obsop_interp_dump_initialize
+
+subroutine obsop_interp_dump_finalize()
+  if (obsop_interp_dump_unit >= 0) then
+    close(obsop_interp_dump_unit)
+  end if
+  obsop_interp_dump_unit = -1
+  obsop_interp_dump_ready = .false.
+  obsop_interp_dump_file = ''
+end subroutine obsop_interp_dump_finalize
+
+subroutine obsop_interp_dump_write(dump_ctx, label, values)
+  type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
+  character(len=*), intent(in) :: label
+  real(r_size), intent(in) :: values(:)
+  integer :: i
+  character(len=16) :: stage_tag
+  character(len=16) :: label_tag
+
+  if (.not. OBSOP_INTERP_DUMP) return
+  if (.not. present(dump_ctx)) return
+  if (.not. obsop_interp_dump_ready) call obsop_interp_dump_initialize()
+  if (.not. obsop_interp_dump_ready) return
+
+  stage_tag = trim(adjustl(dump_ctx%stage))
+  label_tag = trim(adjustl(label))
+
+  write(obsop_interp_dump_unit,'(I10,1X,I10,1X,I10,1X,I10,1X,A16,1X,I6,1X,I6,1X,ES18.10,1X,ES18.10,1X,ES18.10,1X,ES18.10,1X,ES18.10,1X,ES18.10,1X,A16)', advance='no') &
+    dump_ctx%obs_set, dump_ctx%obs_idx, dump_ctx%elm, dump_ctx%typ, stage_tag, dump_ctx%rank_global, dump_ctx%rank_domain, &
+    dump_ctx%ri, dump_ctx%rj, dump_ctx%rk, dump_ctx%lon, dump_ctx%lat, dump_ctx%lev, label_tag
+  do i = 1, size(values)
+    write(obsop_interp_dump_unit,'(1X,ES18.10)', advance='no') values(i)
+  end do
+  write(obsop_interp_dump_unit,*)
+end subroutine obsop_interp_dump_write
 !-----------------------------------------------------------------------
 ! TC center search
 !  [AUTHORS:] T. Miyoshi and M. Kunii
@@ -1591,6 +1686,7 @@ subroutine monit_obs(v3dg,v2dg,topo,nobs,bias,rmse,monit_type,use_key,step)
   real(r_size),allocatable :: oelm(:)
   real(r_size),allocatable :: ohx(:)
   integer,allocatable :: oqc(:)
+  type(obsop_interp_dump_context) :: dump_ctx
 
   integer :: m
   real(r_size) :: obsdep_mean
@@ -1677,6 +1773,19 @@ subroutine monit_obs(v3dg,v2dg,topo,nobs,bias,rmse,monit_type,use_key,step)
       stop
     end if
 #endif
+    dump_ctx%obs_set  = iset
+    dump_ctx%obs_idx  = iidx
+    dump_ctx%elm      = obs(iset)%elm(iidx)
+    dump_ctx%typ      = obs(iset)%typ(iidx)
+    dump_ctx%stage    = 'monit'
+    dump_ctx%rank_global = PRC_myrank
+    dump_ctx%rank_domain = PRC_myrank
+    dump_ctx%ri       = ril
+    dump_ctx%rj       = rjl
+    dump_ctx%lon      = obs(iset)%lon(iidx)
+    dump_ctx%lat      = obs(iset)%lat(iidx)
+    dump_ctx%lev      = obs(iset)%lev(iidx)
+    dump_ctx%rk       = 0.0_r_size
 
     if (DEPARTURE_STAT_T_RANGE <= 0.0d0 .or. &
         abs(obs(iset)%dif(iidx)) <= DEPARTURE_STAT_T_RANGE) then
@@ -1690,9 +1799,10 @@ subroutine monit_obs(v3dg,v2dg,topo,nobs,bias,rmse,monit_type,use_key,step)
         call phys2ijk(v3dgh(:,:,:,iv3dd_p),obs(iset)%elm(iidx), &
                       ril,rjl,obs(iset)%lev(iidx),rk,oqc(n),typ=obs(iset)%typ(iidx))
         if (oqc(n) == iqc_good) then
+          dump_ctx%rk = rk
           call Trans_XtoY(obs(iset)%elm(iidx),ril,rjl,rk, &
                           obs(iset)%lon(iidx),obs(iset)%lat(iidx), &
-                          v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1,typ=obs(iset)%typ(iidx))
+                          v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1,typ=obs(iset)%typ(iidx),dump_ctx=dump_ctx)
         end if
       !=========================================================================
       case (obsfmt_radar, obsfmt_radar_nc )
@@ -1700,10 +1810,11 @@ subroutine monit_obs(v3dg,v2dg,topo,nobs,bias,rmse,monit_type,use_key,step)
         if (DEPARTURE_STAT_RADAR) then
           call phys2ijkz(v3dgh(:,:,:,iv3dd_hgt),ril,rjl,obs(iset)%lev(iidx),rkz,oqc(n))
           if (oqc(n) == iqc_good) then
+            dump_ctx%rk = rkz
             call Trans_XtoY_radar(obs(iset)%elm(iidx),obs(iset)%meta(1), &
                                   obs(iset)%meta(2),obs(iset)%meta(3),ril,rjl,rkz, &
                                   obs(iset)%lon(iidx),obs(iset)%lat(iidx), &
-                                  obs(iset)%lev(iidx),v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1)
+                                  obs(iset)%lev(iidx),v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1,dump_ctx=dump_ctx)
             if (oqc(n) == iqc_ref_low) oqc(n) = iqc_good ! when process the observation operator, we don't care if reflectivity is too small
           end if
         end if

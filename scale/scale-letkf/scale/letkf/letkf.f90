@@ -239,6 +239,7 @@ PROGRAM letkf
     write(6,'(a)') 'letkf finished successfully'
   endif
 
+  call obsop_interp_dump_finalize()
   call finalize_mpi_scale
 
   STOP

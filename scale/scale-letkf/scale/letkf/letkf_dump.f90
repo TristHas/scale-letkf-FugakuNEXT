@@ -15,6 +15,7 @@ MODULE letkf_dump
   character(len=*), parameter :: metadata_ext = '.txt'
   character(len=*), parameter :: obs_stage_after_obsope = 'obsda_after_obsope'
   character(len=*), parameter :: obs_stage_after_set = 'obsda_after_set_letkf'
+  character(len=*), parameter :: obsop_interp_stage_root = 'obsop_interp'
   character(len=*), parameter :: das_stage_root = 'das_letkf'
   character(len=*), parameter :: state_meta_subdir = 'state_meta'
   integer, parameter :: das_dump_rank = -1
@@ -47,6 +48,7 @@ MODULE letkf_dump
   public :: prepare_das_dump_base
   public :: dump_obsop_cal_state
   public :: dump_obsop_cal_slot
+  public :: dump_obsop_interp
 
 CONTAINS
 
@@ -57,6 +59,47 @@ CONTAINS
   SUBROUTINE dump_letkf_obs_after_set()
     call dump_obsda_stage(obs_stage_after_set, obsda_sort)
   END SUBROUTINE dump_letkf_obs_after_set
+
+  SUBROUTINE dump_obsop_interp(stage_tag, obs_set, obs_idx, ri, rj, rk, level_kind)
+    character(len=*), intent(in) :: stage_tag
+    integer, intent(in) :: obs_set(:)
+    integer, intent(in) :: obs_idx(:)
+    real(r_size), intent(in) :: ri(:)
+    real(r_size), intent(in) :: rj(:)
+    real(r_size), intent(in) :: rk(:)
+    integer, intent(in), optional :: level_kind(:)
+    character(len=filelenmax) :: base_dir
+    character(len=filelenmax) :: stage_dir
+    character(len=8) :: domain_tag
+    character(len=memflen+3) :: ensemble_tag
+
+    if (.not. LETKF_INPUT_DUMP) return
+    if (size(obs_set) == 0) return
+    if (size(obs_set) /= size(obs_idx)) return
+    if (size(obs_set) /= size(ri)) return
+    if (size(obs_set) /= size(rj)) return
+    if (size(obs_set) /= size(rk)) return
+    if (present(level_kind)) then
+      if (size(obs_set) /= size(level_kind)) return
+    end if
+
+    base_dir = append_dir(trim_dir(LETKF_INPUT_DUMP_DIR), obsop_interp_stage_root)
+    call ensure_directory(base_dir)
+    stage_dir = append_dir(base_dir, trim(stage_tag))
+    call ensure_directory(stage_dir)
+
+    domain_tag = domain_suffix()
+    ensemble_tag = ensemble_suffix()
+
+    call write_integer_vector(build_rank_filename(stage_dir, 'obsop_interp_set', domain_tag, ensemble_tag), obs_set)
+    call write_integer_vector(build_rank_filename(stage_dir, 'obsop_interp_idx', domain_tag, ensemble_tag), obs_idx)
+    call write_real_vector(build_rank_filename(stage_dir, 'obsop_interp_ri', domain_tag, ensemble_tag), ri)
+    call write_real_vector(build_rank_filename(stage_dir, 'obsop_interp_rj', domain_tag, ensemble_tag), rj)
+    call write_real_vector(build_rank_filename(stage_dir, 'obsop_interp_rk', domain_tag, ensemble_tag), rk)
+    if (present(level_kind)) then
+      call write_integer_vector(build_rank_filename(stage_dir, 'obsop_interp_levelkind', domain_tag, ensemble_tag), level_kind)
+    end if
+  END SUBROUTINE dump_obsop_interp
 
   SUBROUTINE dump_obsda_stage(stage_tag, obs_data)
     character(len=*), intent(in) :: stage_tag

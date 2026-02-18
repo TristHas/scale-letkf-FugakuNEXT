@@ -17,6 +17,7 @@ module scale_letkf
   use scale_precision
   use scale_io
   use scale_prof
+  use iso_fortran_env, only: error_unit
 
   use mpi
 
@@ -105,6 +106,22 @@ module scale_letkf
     integer, allocatable :: next(:,:)              ! temporary array
   end type obs_grid_type
 
+  type :: obsop_interp_dump_context
+    integer :: obs_set = -1
+    integer :: obs_idx = -1
+    integer :: elm     = -1
+    integer :: typ     = -1
+    character(len=H_MID) :: stage = ''
+    integer :: rank_ens = -1
+    integer :: rank_lcl = -1
+    real(RP) :: ri  = 0.0_RP
+    real(RP) :: rj  = 0.0_RP
+    real(RP) :: rk  = 0.0_RP
+    real(RP) :: lon = 0.0_RP
+    real(RP) :: lat = 0.0_RP
+    real(RP) :: lev = 0.0_RP
+  end type obsop_interp_dump_context
+
   !-----------------------------------------------------------------------------
   !
   !++ Private procedure
@@ -175,6 +192,10 @@ module scale_letkf
   private :: monit_dep
   private :: monit_print
   private :: state_to_history
+  private :: obsop_interp_dump_initialize
+  private :: obsop_interp_dump_finalize
+  private :: obsop_interp_dump_write
+  private :: obsop_interp_dump_ensure_dir
 
   !-----------------------------------------------------------------------------
   !
@@ -494,6 +515,11 @@ module scale_letkf
   logical :: LETKF_ENTIRE_GRID_SEARCH_Y                    = .false.         !
 
   logical :: LETKF_DEBUG_LOG                               = .false.
+  logical :: OBSOP_INTERP_DUMP                             = .false.
+  character(len=H_LONG) :: OBSOP_INTERP_DUMP_DIR           = 'obs_interp_dump'
+  logical :: obsop_dump_ready                              = .false.
+  integer :: obsop_dump_unit                               = -1
+  character(len=H_LONG) :: obsop_dump_file                 = ''
 
   type(obs_info), allocatable :: obs(:)
 
@@ -721,11 +747,13 @@ contains
       OBSERR_Q,                        &
       OBSERR_RH,                       &
       OBSERR_PS,                       &
-      OBSERR_RADAR_REF,                & 
+      OBSERR_RADAR_REF,                &
       OBSERR_RADAR_VR,                 &
       OBSERR_PQ,                       &
       LETKF_ENTIRE_GRID_SEARCH_X,      &
-      LETKF_ENTIRE_GRID_SEARCH_Y
+      LETKF_ENTIRE_GRID_SEARCH_Y,      &
+      OBSOP_INTERP_DUMP,               &
+      OBSOP_INTERP_DUMP_DIR
 
     integer :: n_mem
     integer :: n_mempn
@@ -790,6 +818,8 @@ contains
     COMM_LCL = local_comm
     NPRC_LCL = local_nprocs
     RANK_LCL = local_myrank
+
+    call obsop_interp_dump_initialize()
 
     DX = delta_x
     DY = delta_y
@@ -879,6 +909,8 @@ contains
   !-----------------------------------------------------------------------------
   subroutine LETKF_finalize()
     implicit none
+
+    call obsop_interp_dump_finalize()
 
     deallocate( rig1  )
     deallocate( rjg1  )
@@ -1088,6 +1120,7 @@ contains
     integer, optional, intent(in) :: nobs_extern
 
     type(obs_da_value) :: obsda_tmp
+    type(obsop_interp_dump_context) :: dump_ctx
 
     integer :: i, j, k
     integer :: it, im, iof, islot, ierr
@@ -1393,6 +1426,19 @@ contains
           n = obsda_tmp%idx(nn)
 
           call rij_g2l(RANK_LCL, obs(iof)%ri(n), obs(iof)%rj(n), ril, rjl)
+          dump_ctx%obs_set  = iof
+          dump_ctx%obs_idx  = n
+          dump_ctx%elm      = obs(iof)%elm(n)
+          dump_ctx%typ      = obs(iof)%typ(n)
+          dump_ctx%stage    = 'obsop'
+          dump_ctx%rank_ens = RANK_ENS
+          dump_ctx%rank_lcl = RANK_LCL
+          dump_ctx%ri       = ril
+          dump_ctx%rj       = rjl
+          dump_ctx%lon      = obs(iof)%lon(n)
+          dump_ctx%lat      = obs(iof)%lat(n)
+          dump_ctx%lev      = obs(iof)%lev(n)
+          dump_ctx%rk       = 0.0_RP
 
           if (.not. USE_OBS(obs(iof)%typ(n))) then
             obsda_tmp%qc(nn) = iqc_otype
@@ -1405,8 +1451,9 @@ contains
           !---------------------------------------------------------------------
             call phys2ijk(v3dg(:,:,:,iv3dd_p), obs(iof)%elm(n), ril, rjl, obs(iof)%lev(n), rk, obsda_tmp%qc(nn))
             if (obsda_tmp%qc(nn) == iqc_good) then
+              dump_ctx%rk = rk
               call Trans_XtoY(obs(iof)%elm(n), ril, rjl, rk, &
-                              obs(iof)%lon(n), obs(iof)%lat(n), v3dg, v2dg, obsda_tmp%val(nn), obsda_tmp%qc(nn))
+                              obs(iof)%lon(n), obs(iof)%lat(n), v3dg, v2dg, obsda_tmp%val(nn), obsda_tmp%qc(nn), dump_ctx=dump_ctx)
             end if
           !=====================================================================
           case ( 'RADAR', 'PAWR_TOSHIBA', 'MP_PAWR_TOSHIBA', 'PAWR_JRC', 'HIMAWARI8' )
@@ -1417,8 +1464,9 @@ contains
               call phys2ijkz(v3dg(:,:,:,iv3dd_hgt), ril, rjl, obs(iof)%lev(n), rkz, obsda_tmp%qc(nn))
             end if
             if (obsda_tmp%qc(nn) == iqc_good) then
+              dump_ctx%rk = rkz
               call Trans_XtoY_radar(obs(iof)%elm(n), obs(iof)%meta(1), obs(iof)%meta(2), obs(iof)%meta(3), ril, rjl, rkz, &
-                                    obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda_tmp%val(nn), obsda_tmp%qc(nn))
+                                    obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda_tmp%val(nn), obsda_tmp%qc(nn), dump_ctx=dump_ctx)
               !if (obsda_tmp%qc(nn) == iqc_ref_low) obsda_tmp%qc(nn) = iqc_good ! when process the observation operator, we don't care if reflectivity is too small
 
               call itpl_3d( v3dg(:,:,:,iv3dd_p), rkz, ril, rjl, obsda_tmp%pm(nn) )
@@ -6073,7 +6121,7 @@ contains
   !  0: non-staggered grid
   !  1: staggered grid
   !-----------------------------------------------------------------------
-  subroutine Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd)
+  subroutine Trans_XtoY(elm,ri,rj,rk,lon,lat,v3d,v2d,yobs,qc,stggrd,dump_ctx)
     use scale_const, only: &
       UNDEF => CONST_UNDEF, &
       FVIRT => CONST_EPSTVap
@@ -6086,7 +6134,8 @@ contains
     real(RP), intent(out) :: yobs
     integer,  intent(out) :: qc
     integer,  intent(in), optional :: stggrd
-    real(RP) :: u,v,t,q,topo
+    type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
+    real(RP) :: u,v,t,q,topo,psfc,rhval
 
     integer :: stggrd_ = 0
     if (present(stggrd)) stggrd_ = stggrd
@@ -6103,30 +6152,40 @@ contains
         call itpl_3d(v3d(:,:,:,iv3dd_u),rk,ri,rj,u)
         call itpl_3d(v3d(:,:,:,iv3dd_v),rk,ri,rj,v)
       end if
+      call obsop_interp_dump_write(dump_ctx, 'uv', (/u, v/))
       if (elm == id_u_obs) then
         yobs = u
       else
         yobs = v
       end if
     case(id_t_obs)  ! T
-      call itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,yobs)
+      call itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,t)
+      call obsop_interp_dump_write(dump_ctx, 't', (/t/))
+      yobs = t
     case(id_tv_obs)  ! Tv
-      call itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,yobs)
+      call itpl_3d(v3d(:,:,:,iv3dd_t),rk,ri,rj,t)
       call itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,q)
-      yobs = yobs * (1.0d0 + fvirt * q)
+      call obsop_interp_dump_write(dump_ctx, 'tv', (/t, q/))
+      yobs = t * (1.0d0 + fvirt * q)
     case(id_q_obs)  ! Q
-      call itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,yobs)
+      call itpl_3d(v3d(:,:,:,iv3dd_q),rk,ri,rj,q)
+      call obsop_interp_dump_write(dump_ctx, 'q', (/q/))
+      yobs = q
     case(id_ps_obs) ! PS
       call itpl_2d(v2d(:,:,iv2dd_t2m),ri,rj,t)
       call itpl_2d(v2d(:,:,iv2dd_q2m),ri,rj,q)
       call itpl_2d(v2d(:,:,iv2dd_topo),ri,rj,topo)
       call itpl_2d(v2d(:,:,iv2dd_ps),ri,rj,yobs)
+      psfc = yobs
+      call obsop_interp_dump_write(dump_ctx, 'ps', (/t, q, topo, psfc/))
       call prsadj(yobs,rk-topo,t,q)
       if( abs(rk-topo) > PS_ADJUST_THRES ) then
         qc = iqc_ps_ter
       end if
     case(id_rh_obs) ! RH
-      call itpl_3d(v3d(:,:,:,iv3dd_rh),rk,ri,rj,yobs)
+      call itpl_3d(v3d(:,:,:,iv3dd_rh),rk,ri,rj,rhval)
+      call obsop_interp_dump_write(dump_ctx, 'rh', (/rhval/))
+      yobs = rhval
     case default
       qc = iqc_otype
     end select
@@ -6134,7 +6193,7 @@ contains
     return
   end subroutine Trans_XtoY
 
-  subroutine Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev,v3d,v2d,yobs,qc,stggrd)
+  subroutine Trans_XtoY_radar(elm,radar_lon,radar_lat,radar_z,ri,rj,rk,lon,lat,lev,v3d,v2d,yobs,qc,stggrd,dump_ctx)
     use scale_const, only: &
       UNDEF => CONST_UNDEF, &
       D2R   => CONST_D2R,   &
@@ -6151,6 +6210,7 @@ contains
     real(RP), intent(out) :: yobs
     integer,  intent(out) :: qc
     integer,  intent(in), optional :: stggrd
+    type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
 
     integer :: stggrd_ = 0
 
@@ -6183,6 +6243,7 @@ contains
     CALL itpl_3d(v3d(:,:,:,iv3dd_qi),rk,ri,rj,qir)
     CALL itpl_3d(v3d(:,:,:,iv3dd_qs),rk,ri,rj,qsr)
     CALL itpl_3d(v3d(:,:,:,iv3dd_qg),rk,ri,rj,qgr)
+    call obsop_interp_dump_write(dump_ctx, 'radar_state', (/ur, vr, wr, tr, pr, qvr, qcr, qrr, qir, qsr, qgr/))
 
     ! Compute az and elevation for the current observation.
     ! Simple approach (TODO: implement a more robust computation)
@@ -6235,6 +6296,83 @@ contains
 
     return
   end subroutine Trans_XtoY_radar
+
+  subroutine obsop_interp_dump_initialize()
+    character(len=H_LONG) :: dir
+    character(len=H_LONG) :: fname
+    integer :: ios
+
+    if (.not. OBSOP_INTERP_DUMP) return
+    if (obsop_dump_ready) return
+
+    dir = trim(OBSOP_INTERP_DUMP_DIR)
+    if (len_trim(dir) > 0) then
+      call obsop_interp_dump_ensure_dir(dir)
+      write(fname,'(A,"/obs_interp_rank",I4.4,"_loc",I4.4,".dat")') trim(dir), RANK_ENS, RANK_LCL
+    else
+      write(fname,'("obs_interp_rank",I4.4,"_loc",I4.4,".dat")') RANK_ENS, RANK_LCL
+    end if
+
+    obsop_dump_unit = IO_get_available_fid()
+    open(obsop_dump_unit, file=trim(fname), status='replace', action='write', form='formatted', iostat=ios)
+    if (ios /= 0) then
+      write(error_unit,'(A,1X,A,1X,I0)') 'LETKF: failed to open obs interpolation dump file', trim(fname), ios
+      obsop_dump_unit = -1
+      OBSOP_INTERP_DUMP = .false.
+      return
+    end if
+
+    obsop_dump_ready = .true.
+    obsop_dump_file = trim(fname)
+    write(obsop_dump_unit,'(A)') '# obs_set obs_idx elm typ stage rank_ens rank_lcl ri rj rk lon lat lev value_kind values...'
+  end subroutine obsop_interp_dump_initialize
+
+  subroutine obsop_interp_dump_finalize()
+    integer :: ios
+
+    if (obsop_dump_unit >= 0) then
+      close(obsop_dump_unit, iostat=ios)
+    end if
+    obsop_dump_unit = -1
+    obsop_dump_ready = .false.
+    obsop_dump_file = ''
+  end subroutine obsop_interp_dump_finalize
+
+  subroutine obsop_interp_dump_write(dump_ctx, label, values)
+    type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
+    character(len=*), intent(in) :: label
+    real(RP), intent(in) :: values(:)
+    integer :: i
+    character(len=H_MID) :: stage_tag
+    character(len=H_MID) :: label_tag
+
+    if (.not. OBSOP_INTERP_DUMP) return
+    if (.not. obsop_dump_ready) return
+    if (.not. present(dump_ctx)) return
+    stage_tag = trim(adjustl(dump_ctx%stage))
+    label_tag = trim(adjustl(label))
+
+    write(obsop_dump_unit,'(I10,1X,I10,1X,I10,1X,I10,1X,A16,1X,I6,1X,I6,1X,F12.5,1X,F12.5,1X,F12.5,1X,F11.5,1X,F11.5,1X,F11.5,1X,A16)', advance='no') &
+      dump_ctx%obs_set, dump_ctx%obs_idx, dump_ctx%elm, dump_ctx%typ, stage_tag, dump_ctx%rank_ens, dump_ctx%rank_lcl, &
+      dump_ctx%ri, dump_ctx%rj, dump_ctx%rk, dump_ctx%lon, dump_ctx%lat, dump_ctx%lev, label_tag
+    do i = 1, size(values)
+      write(obsop_dump_unit,'(1X,ES20.12E3)', advance='no') values(i)
+    end do
+    write(obsop_dump_unit,*)
+  end subroutine obsop_interp_dump_write
+
+  subroutine obsop_interp_dump_ensure_dir(dir)
+    character(len=*), intent(in) :: dir
+    character(len=:), allocatable :: command
+    integer :: istat
+
+    if (len_trim(dir) <= 0) return
+    command = 'mkdir -p "' // trim(adjustl(dir)) // '"'
+    call execute_command_line(command, wait=.true., exitstat=istat)
+    if (istat /= 0) then
+      write(error_unit,'(A,1X,A,1X,I0)') 'LETKF: failed to create dump directory', trim(dir), istat
+    end if
+  end subroutine obsop_interp_dump_ensure_dir
 
   !-----------------------------------------------------------------------
   ! Pressure adjustment for a different height level
@@ -7826,6 +7964,7 @@ contains
     real(RP), allocatable :: oelm(:)
     real(RP), allocatable :: ohx(:)
     integer,  allocatable :: oqc(:)
+    type(obsop_interp_dump_context) :: dump_ctx
 
     call state_to_history(v3dg, v2dg, v3dgh, v2dgh)
 
@@ -7868,6 +8007,19 @@ contains
 
       oelm(n) = obs(iset)%elm(iidx)
       call rij_g2l(PRC_myrank, obs(iset)%ri(iidx), obs(iset)%rj(iidx), ril, rjl)
+      dump_ctx%obs_set  = iset
+      dump_ctx%obs_idx  = iidx
+      dump_ctx%elm      = obs(iset)%elm(iidx)
+      dump_ctx%typ      = obs(iset)%typ(iidx)
+      dump_ctx%stage    = 'monit'
+      dump_ctx%rank_ens = RANK_ENS
+      dump_ctx%rank_lcl = PRC_myrank
+      dump_ctx%ri       = ril
+      dump_ctx%rj       = rjl
+      dump_ctx%lon      = obs(iset)%lon(iidx)
+      dump_ctx%lat      = obs(iset)%lat(iidx)
+      dump_ctx%lev      = obs(iset)%lev(iidx)
+      dump_ctx%rk       = 0.0_RP
 
       if (DEPARTURE_STAT_T_RANGE <= 0.0d0 .or. &
           abs(obs(iset)%dif(iidx)) <= DEPARTURE_STAT_T_RANGE) then
@@ -7881,9 +8033,10 @@ contains
           call phys2ijk(v3dgh(:,:,:,iv3dd_p),obs(iset)%elm(iidx), &
                         ril,rjl,obs(iset)%lev(iidx),rk,oqc(n))
           if (oqc(n) == iqc_good) then
+            dump_ctx%rk = rk
             call Trans_XtoY(obs(iset)%elm(iidx),ril,rjl,rk, &
                             obs(iset)%lon(iidx),obs(iset)%lat(iidx), &
-                            v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1)
+                            v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1,dump_ctx=dump_ctx)
           end if
         !=========================================================================
         case ( 'RADAR', 'PAWR_TOSHIBA', 'MP_PAWR_TOSHIBA', 'PAWR_JRC', 'HIMAWARI8' )
@@ -7891,10 +8044,11 @@ contains
           if (DEPARTURE_STAT_RADAR) then
             call phys2ijkz(v3dgh(:,:,:,iv3dd_hgt),ril,rjl,obs(iset)%lev(iidx),rkz,oqc(n))
             if (oqc(n) == iqc_good) then
+              dump_ctx%rk = rkz
               call Trans_XtoY_radar(obs(iset)%elm(iidx),obs(iset)%meta(1), &
                                     obs(iset)%meta(2),obs(iset)%meta(3),ril,rjl,rkz, &
                                     obs(iset)%lon(iidx),obs(iset)%lat(iidx), &
-                                    obs(iset)%lev(iidx),v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1)
+                                    obs(iset)%lev(iidx),v3dgh,v2dgh,ohx(n),oqc(n),stggrd=1,dump_ctx=dump_ctx)
               if (oqc(n) == iqc_ref_low) oqc(n) = iqc_good ! when process the observation operator, we don't care if reflectivity is 350
             end if
           end if

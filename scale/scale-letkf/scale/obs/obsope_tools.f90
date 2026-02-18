@@ -78,6 +78,8 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
   real(r_size), allocatable :: mv2dg(:,:,:,:)
 
   real(r_size), allocatable :: mdbz3dg(:,:,:,:)
+
+  type(obsop_interp_dump_context) :: dump_ctx
   real(r_size), allocatable :: slope3dg(:,:,:)
 
   real(r_size) :: ril, rjl, rk, rkz
@@ -489,6 +491,19 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
           n = obsda%idx(nn)
 
           call rij_g2l(myrank_d, obs(iof)%ri(n), obs(iof)%rj(n), ril, rjl)
+          dump_ctx%obs_set  = obsda%set(nn)
+          dump_ctx%obs_idx  = obsda%idx(nn)
+          dump_ctx%elm      = obs(iof)%elm(n)
+          dump_ctx%typ      = obs(iof)%typ(n)
+          dump_ctx%stage    = 'obsop'
+          dump_ctx%rank_global = myrank
+          dump_ctx%rank_domain = myrank_d
+          dump_ctx%ri       = ril
+          dump_ctx%rj       = rjl
+          dump_ctx%lon      = obs(iof)%lon(n)
+          dump_ctx%lat      = obs(iof)%lat(n)
+          dump_ctx%lev      = obs(iof)%lev(n)
+          dump_ctx%rk       = 0.0_r_size
 
           if (nobsl_dump > 0) then
             iloc = nn - n1 + 1
@@ -518,8 +533,9 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
           !---------------------------------------------------------------------
             call phys2ijk(v3dg(:,:,:,iv3dd_p), obs(iof)%elm(n), ril, rjl, obs(iof)%lev(n), rk, obsda%qc(nn), typ=obs(iof)%typ(n))
             if (obsda%qc(nn) == iqc_good) then
+              dump_ctx%rk = rk
               call Trans_XtoY(obs(iof)%elm(n), ril, rjl, rk, &
-                              obs(iof)%lon(n), obs(iof)%lat(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn), typ=obs(iof)%typ(n))
+                              obs(iof)%lon(n), obs(iof)%lat(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn), typ=obs(iof)%typ(n), dump_ctx=dump_ctx)
             end if
           !=====================================================================
           case (obsfmt_radar, obsfmt_radar_nc)
@@ -538,15 +554,18 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
               call phys2ijkz(v3dg(:,:,:,iv3dd_hgt), ril, rjl, obs(iof)%lev(n), rkz, obsda%qc(nn))
             end if
             if (obsda%qc(nn) == iqc_good) then
+              dump_ctx%rk = rkz
               if ( RADAR_ADDITIVE_Y18 ) then
                 call Trans_XtoY_radar(obs(iof)%elm(n), obs(iof)%meta(1), obs(iof)%meta(2), obs(iof)%meta(3), ril, rjl, rkz,       &
                                       obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn), &
                                       mv3d=mv3dg(islot-SLOT_START+1,:,:,:,:), slope3d=slope3dg(islot-SLOT_START+1,:,:), &
-                                      ref_add=obsda%pert(nn) )
+                                      ref_add=obsda%pert(nn), dump_ctx=dump_ctx )
               else
                 call Trans_XtoY_radar(obs(iof)%elm(n), obs(iof)%meta(1), obs(iof)%meta(2), obs(iof)%meta(3), ril, rjl, rkz, &
-                                      obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn))
+                                      obs(iof)%lon(n), obs(iof)%lat(n), obs(iof)%lev(n), v3dg, v2dg, obsda%val(nn), obsda%qc(nn), &
+                                      dump_ctx=dump_ctx)
               endif
+            end if
             if (obsda%qc(nn) == iqc_ref_low) obsda%qc(nn) = iqc_good ! when process the observation operator, we don't care if reflectivity is too small
             if (nobsl_dump > 0) then
               iloc = nn - n1 + 1
@@ -556,15 +575,14 @@ SUBROUTINE obsope_cal(obsda_return, nobs_extern)
             if (RADAR_PQV) then
               call itpl_3d( v3dg(:,:,:,iv3dd_p), rkz, ril, rjl, obsda%pm(nn) )
               call itpl_3d( v3dg(:,:,:,iv3dd_t), rkz, ril, rjl, obsda%tm(nn) )
-                call itpl_3d( v3dg(:,:,:,iv3dd_q), rkz, ril, rjl, obsda%qv(nn) )
-              end if
-
-              !!!!!! may not need to do this at this stage !!!!!!
-              !if (obs(iof)%elm(n) == id_radar_ref_obs) then
-              !  obsda%val(nn) = 10.0d0 * log10(obsda%val(nn))
-              !end if
-              !!!!!!
+              call itpl_3d( v3dg(:,:,:,iv3dd_q), rkz, ril, rjl, obsda%qv(nn) )
             end if
+
+            !!!!!! may not need to do this at this stage !!!!!!
+            !if (obs(iof)%elm(n) == id_radar_ref_obs) then
+            !  obsda%val(nn) = 10.0d0 * log10(obsda%val(nn))
+            !end if
+            !!!!!!
           end select
 
 
