@@ -26,7 +26,7 @@ MODULE letkf_tools
   USE efso_tools
   use letkf_dump, only: dump_letkf_localization_tables, dump_das_obs_local_before, dump_das_obs_local_after, &
     dump_das_letkf_core_before, dump_das_letkf_core_after, dump_das_postproc_before, &
-    dump_das_postproc_after, das_dump_enabled, prepare_das_dump_base
+    dump_das_postproc_after, das_dump_enabled, prepare_das_dump_base, das_dump_reserve_call
 
   use scale_precision, only: RP
 #ifdef PNETCDF
@@ -111,6 +111,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
 
   character(len=timer_name_width) :: timer_str
   logical :: das_dump_active
+  logical :: das_dump_call_selected
   integer(int64) :: das_call_id
   logical :: q_limited
   logical :: workda_present
@@ -309,7 +310,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
 
   call mpi_timer('das_letkf:allocation_shared_vars:', 2)
 
-!$OMP PARALLEL PRIVATE(ilev,ij,n,m,k,hdxf,rdiag,rloc,dep,depd,nobsl,nobsl_t,cutd_t,parm,beta,n2n,n2nc,trans,transm,transmd,transrlx,pa,trans_done,tmpinfl,q_mean,q_sprd,q_anal,timer_str,das_call_id,q_limited,workda_present,workda_value,anal_det_buf)
+!$OMP PARALLEL PRIVATE(ilev,ij,n,m,k,hdxf,rdiag,rloc,dep,depd,nobsl,nobsl_t,cutd_t,parm,beta,n2n,n2nc,trans,transm,transmd,transrlx,pa,trans_done,tmpinfl,q_mean,q_sprd,q_anal,timer_str,das_call_id,q_limited,workda_present,workda_value,anal_det_buf,das_dump_call_selected)
   allocate (hdxf (nobstotal,MEMBER))
   allocate (rdiag(nobstotal))
   allocate (rloc (nobstotal))
@@ -368,6 +369,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
         q_sprd = 0.0d0
         q_limited = .false.
         das_call_id = das_compute_call_id(ij,ilev,n)
+        das_dump_call_selected = .false.
 
         if ( (gues3d(ij,ilev,mmean,iv3d_p) < Q_UPDATE_TOP .and. n >= iv3d_q .and. n <= iv3d_qg) .or. & !GYL - Upper bound of Q update levels
              (gues3d(ij,ilev,mmean,iv3d_p) < UPDATE_TOP ) ) then                                       ! Upper bound for all variables 
@@ -400,11 +402,6 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
 
         ELSE
           ! compute weights with localized observations
-          if (das_dump_active) then
-            call dump_das_obs_local_before(das_call_id, ilev, ij, n, n2nc, n2n, '3d', &
-                 rig1(ij), rjg1(ij), gues3d(ij,ilev,mmean,iv3d_p), hgt1(ij,ilev), &
-                 search_q0(:,n,ij,ilev))
-          end if
           if (DET_RUN) then                                                            !GYL
             CALL obs_local(rig1(ij),rjg1(ij),gues3d(ij,ilev,mmean,iv3d_p),hgt1(ij,ilev),n, & !GYL
                            hdxf,rdiag,rloc,dep,nobsl,depd=depd,nobsl_t=nobsl_t,cutd_t=cutd_t,srch_q0=search_q0(:,n,ij,ilev)) !GYL
@@ -413,10 +410,14 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
                            hdxf,rdiag,rloc,dep,nobsl,nobsl_t=nobsl_t,cutd_t=cutd_t,srch_q0=search_q0(:,n,ij,ilev)) !GYL
           end if                                                                       !GYL
           if (das_dump_active) then
+            das_dump_call_selected = das_dump_reserve_call(das_call_id, nobsl > 0)
+          end if
+          if (das_dump_call_selected) then
+            call dump_das_obs_local_before(das_call_id, ilev, ij, n, n2nc, n2n, '3d', &
+                 rig1(ij), rjg1(ij), gues3d(ij,ilev,mmean,iv3d_p), hgt1(ij,ilev), &
+                 search_q0(:,n,ij,ilev))
             call dump_das_obs_local_after(das_call_id, ilev, ij, n, n2nc, n2n, '3d', nobsl, &
                  hdxf, rdiag, rloc, dep, nobsl_t, cutd_t, search_q0(:,n,ij,ilev))
-          end if
-          if (das_dump_active) then
             call dump_das_letkf_core_before(das_call_id, '3d', ilev, ij, n, n2nc, n2n, nobsl, nobstotal, &
                  parm, hdxf, rdiag, rloc, dep, .true., INFL_MUL_ADAPTIVE)
           end if
@@ -443,7 +444,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
                               rdiag_wloc=.true.,infl_update=INFL_MUL_ADAPTIVE)         !GYL
             end if                                                                     !GYL
           END IF                                                                       !GYL
-          if (das_dump_active) then
+          if (das_dump_call_selected) then
             if (DET_RUN) then
               call dump_das_letkf_core_after(das_call_id, '3d', ilev, ij, n, n2nc, n2n, nobsl, work3d(ij,ilev,n), &
                    trans(:,:,n2nc), transm(:,n2nc), pa(:,:,n2nc), work3d(ij,ilev,n), transmd(:,n2nc))
@@ -465,7 +466,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
 
         END IF
 
-        if (das_dump_active) then
+        if (das_dump_call_selected) then
           call dump_das_postproc_before(das_call_id, '3d', ilev, ij, n, n2nc, n2n, beta, parm, &
                RELAX_ALPHA, RELAX_ALPHA_SPREAD, RELAX_SPREAD_OUT, RELAX_TO_INFLATED_PRIOR, &
                DET_RUN, gues3d(ij,ilev,mmean,n), gues3d(ij,ilev,1:MEMBER,n), &
@@ -535,7 +536,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
           endif
         END IF                                                                         !GYL
 
-        if (das_dump_active) then
+        if (das_dump_call_selected) then
           workda_present = RELAX_SPREAD_OUT .and. allocated(work3da)
           if (workda_present) then
             workda_value = work3da(ij,ilev,n)
@@ -565,6 +566,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
           q_sprd = 0.0d0
           q_limited = .false.
           das_call_id = das_compute_call_id(ij, ilev, nv3d + n)
+          das_dump_call_selected = .false.
 
           if (RELAX_TO_INFLATED_PRIOR) then
             parm = work2d(ij,n)
@@ -593,21 +595,20 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
 
           ELSE
             ! compute weights with localized observations
-            if (das_dump_active) then
-              call dump_das_obs_local_before(das_call_id, ilev, ij, nv3d+n, n2nc, n2n, '2d', &
-                   rig1(ij), rjg1(ij), gues3d(ij,ilev,mmean,iv3d_p), hgt1(ij,ilev), &
-                   search_q0(:,nv3d+1,ij,ilev))
-            end if
             if (DET_RUN) then                                                          !GYL
               CALL obs_local(rig1(ij),rjg1(ij),gues3d(ij,ilev,mmean,iv3d_p),hgt1(ij,ilev),nv3d+n,hdxf,rdiag,rloc,dep,nobsl,depd=depd,nobsl_t=nobsl_t,cutd_t=cutd_t,srch_q0=search_q0(:,nv3d+1,ij,ilev))
             else                                                                       !GYL
               CALL obs_local(rig1(ij),rjg1(ij),gues3d(ij,ilev,mmean,iv3d_p),hgt1(ij,ilev),nv3d+n,hdxf,rdiag,rloc,dep,nobsl,nobsl_t=nobsl_t,cutd_t=cutd_t,srch_q0=search_q0(:,nv3d+1,ij,ilev))
             end if                                                                     !GYL
             if (das_dump_active) then
+              das_dump_call_selected = das_dump_reserve_call(das_call_id, nobsl > 0)
+            end if
+            if (das_dump_call_selected) then
+              call dump_das_obs_local_before(das_call_id, ilev, ij, nv3d+n, n2nc, n2n, '2d', &
+                   rig1(ij), rjg1(ij), gues3d(ij,ilev,mmean,iv3d_p), hgt1(ij,ilev), &
+                   search_q0(:,nv3d+1,ij,ilev))
               call dump_das_obs_local_after(das_call_id, ilev, ij, nv3d+n, n2nc, n2n, '2d', nobsl, &
                    hdxf, rdiag, rloc, dep, nobsl_t, cutd_t, search_q0(:,nv3d+1,ij,ilev))
-            end if
-            if (das_dump_active) then
               call dump_das_letkf_core_before(das_call_id, '2d', ilev, ij, nv3d+n, n2nc, n2n, nobsl, nobstotal, &
                    parm, hdxf, rdiag, rloc, dep, .true., INFL_MUL_ADAPTIVE)
             end if
@@ -634,7 +635,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
                                 rdiag_wloc=.true.,infl_update=INFL_MUL_ADAPTIVE)       !GYL
               end if                                                                   !GYL
             END IF                                                                     !GYL
-            if (das_dump_active) then
+            if (das_dump_call_selected) then
               if (DET_RUN) then
                 call dump_das_letkf_core_after(das_call_id, '2d', ilev, ij, nv3d+n, n2nc, n2n, nobsl, work2d(ij,n), &
                      trans(:,:,n2nc), transm(:,n2nc), pa(:,:,n2nc), work2d(ij,n), transmd(:,n2nc))
@@ -651,7 +652,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
           END IF
 
           ! relaxation via LETKF weight
-          if (das_dump_active) then
+          if (das_dump_call_selected) then
             call dump_das_postproc_before(das_call_id, '2d', ilev, ij, nv3d+n, n2nc, n2n, beta, parm, &
                  RELAX_ALPHA, RELAX_ALPHA_SPREAD, RELAX_SPREAD_OUT, RELAX_TO_INFLATED_PRIOR, &
                  DET_RUN, gues2d(ij,mmean,n), gues2d(ij,1:MEMBER,n), trans(:,:,n2nc), transm(:,n2nc))
@@ -698,7 +699,7 @@ SUBROUTINE das_letkf(gues3d,gues2d,anal3d,anal2d)
                                  + anal2d(ij,mmdet,n) * beta                           !GYL
             end if                                                                     !GYL
 
-            if (das_dump_active) then
+            if (das_dump_call_selected) then
               workda_present = RELAX_SPREAD_OUT .and. allocated(work2da)
               if (workda_present) then
                 workda_value = work2da(ij,n)

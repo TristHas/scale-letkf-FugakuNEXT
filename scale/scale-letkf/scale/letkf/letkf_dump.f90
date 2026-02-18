@@ -20,6 +20,7 @@ MODULE letkf_dump
   character(len=*), parameter :: state_meta_subdir = 'state_meta'
   integer, parameter :: das_dump_rank = -1
   integer(int64), parameter :: das_dump_max_calls = 2000_int64
+  integer, parameter :: das_selection_capacity = max(1, int(das_dump_max_calls))
 
   character(len=filelenmax), save :: das_base_dir = ''
   logical, save :: das_base_ready = .false.
@@ -28,6 +29,9 @@ MODULE letkf_dump
   integer, save :: das_trace_count = 0
   character(len=filelenmax), save :: obsop_cal_base = ''
   logical, save :: obsop_cal_ready = .false.
+  integer(int64), allocatable, save :: das_selected_calls(:)
+  integer(int64), save :: das_selected_count = 0_int64
+  logical, save :: das_selection_active = .false.
 
   public :: dump_letkf_obs_after_obsope
   public :: dump_letkf_obs_after_set
@@ -49,6 +53,7 @@ MODULE letkf_dump
   public :: dump_obsop_cal_state
   public :: dump_obsop_cal_slot
   public :: dump_obsop_interp
+  public :: das_dump_reserve_call
 
 CONTAINS
 
@@ -1606,11 +1611,75 @@ CONTAINS
     das_dump_ready = das_dump_enabled() .and. das_base_ready
   END FUNCTION das_dump_ready
 
+  SUBROUTINE ensure_das_selection_storage()
+    if (allocated(das_selected_calls)) return
+    allocate(das_selected_calls(das_selection_capacity))
+  END SUBROUTINE ensure_das_selection_storage
+
+  LOGICAL FUNCTION das_dump_call_selected(call_id)
+    integer(int64), intent(in) :: call_id
+    integer :: i, count_int
+    das_dump_call_selected = .false.
+    if (.not. allocated(das_selected_calls)) return
+!$omp critical(das_dump_selection)
+    count_int = int(das_selected_count)
+    do i = 1, count_int
+      if (das_selected_calls(i) == call_id) then
+        das_dump_call_selected = .true.
+        exit
+      end if
+    end do
+!$omp end critical
+  END FUNCTION das_dump_call_selected
+
+  LOGICAL FUNCTION das_dump_reserve_call(call_id, has_observations)
+    integer(int64), intent(in) :: call_id
+    logical, intent(in) :: has_observations
+    integer :: i, count_int
+    logical :: found
+
+    das_dump_reserve_call = .false.
+    if (.not. has_observations) return
+    if (.not. das_dump_ready()) return
+    call ensure_das_selection_storage()
+!$omp critical(das_dump_selection)
+    count_int = int(das_selected_count)
+    found = .false.
+    do i = 1, count_int
+      if (das_selected_calls(i) == call_id) then
+        found = .true.
+        exit
+      end if
+    end do
+    if (found) then
+      das_dump_reserve_call = .true.
+    else if (das_dump_max_calls > 0_int64) then
+      if (das_selected_count >= das_dump_max_calls) then
+        das_dump_reserve_call = .false.
+      else if (count_int >= size(das_selected_calls)) then
+        das_dump_reserve_call = .false.
+      else
+        das_selected_count = das_selected_count + 1_int64
+        das_selected_calls(int(das_selected_count)) = call_id
+        das_selection_active = .true.
+        das_dump_reserve_call = .true.
+      end if
+    else if (count_int < size(das_selected_calls)) then
+      das_selected_count = das_selected_count + 1_int64
+      das_selected_calls(int(das_selected_count)) = call_id
+      das_selection_active = .true.
+      das_dump_reserve_call = .true.
+    end if
+!$omp end critical
+  END FUNCTION das_dump_reserve_call
+
   LOGICAL FUNCTION das_dump_allow(call_id)
     integer(int64), intent(in) :: call_id
     das_dump_allow = .false.
     if (.not. das_dump_ready()) return
-    if (das_dump_max_calls > 0_int64) then
+    if (das_selection_active) then
+      if (.not. das_dump_call_selected(call_id)) return
+    else if (das_dump_max_calls > 0_int64) then
       if (call_id > das_dump_max_calls) return
     end if
     das_dump_allow = .true.
