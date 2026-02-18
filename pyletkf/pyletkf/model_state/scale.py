@@ -27,9 +27,9 @@ class ScaleLetkfConverter():
         scale_state = state["state"].values.permute(1, 0, 2, 3, 4).contiguous()
         letkf_state = scale_to_letkf(scale_state, self.rdry, self.cvvap, 
                                      self.rvap, self.cvdry, self.pre00)
-        
         letkf_state = letkf_state.permute(1, 0, 2, 3, 4).contiguous()
         out_state = state.assign_coords(variable=LETKF_VARIABLES)
+        out_state.attrs.update(state.attrs)
         out_state["state"] = (state["state"].dims, letkf_state)
         return out_state
 
@@ -39,8 +39,8 @@ class ScaleLetkfConverter():
         letkf_state = state["state"].values.transpose(0,1).contiguous()
         scale_state = letkf_to_scale(letkf_state, self.rdry, self.cvvap, 
                                      self.rvap, self.cvdry, self.pre00)
-        
+        scale_state = scale_state.permute(1, 0, 2, 3, 4).contiguous()
         out_state = state.assign_coords(variable=SCALE_VARIABLES)
         out_state["height"]=state["height"]
-        out_state["state"]= (state["state"].dims, scale_state.transpose(0,1).contiguous())
+        out_state["state"]= (state["state"].dims, scale_state)
         return out_state
