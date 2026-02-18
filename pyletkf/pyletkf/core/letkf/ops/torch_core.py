@@ -1,3 +1,7 @@
+import math
+
+from tqdm.auto import tqdm
+
 import torch
 
 def localize_hdx(hdx, rdiag, mask):
@@ -50,7 +54,7 @@ def chunked_eigen_solver(work1, chunk_size=50_000):
     n_chunks = math.ceil(work1.shape[0] / chunk_size)
     eigen_pairs = [
         torch.linalg.eigh(work1[i * chunk_size:(i + 1) * chunk_size])
-        for i in tqdm(range(n_chunks))
+        for i in tqdm(range(n_chunks), disable=(n_chunks == 1))
     ]
     einval, einvec = zip(*eigen_pairs)
     return torch.cat(einval), torch.cat(einvec)
