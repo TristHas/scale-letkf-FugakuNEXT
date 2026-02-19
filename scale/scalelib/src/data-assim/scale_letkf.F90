@@ -6243,7 +6243,8 @@ contains
     CALL itpl_3d(v3d(:,:,:,iv3dd_qi),rk,ri,rj,qir)
     CALL itpl_3d(v3d(:,:,:,iv3dd_qs),rk,ri,rj,qsr)
     CALL itpl_3d(v3d(:,:,:,iv3dd_qg),rk,ri,rj,qgr)
-    call obsop_interp_dump_write(dump_ctx, 'radar_state', (/ur, vr, wr, tr, pr, qvr, qcr, qrr, qir, qsr, qgr/))
+    call obsop_interp_dump_write(dump_ctx, 'radar_state', (/ur, vr, wr, tr, pr, qvr, qcr, qrr, qir, qsr, qgr, rk, ri, rj/), &
+      int_values=(/stggrd_/))
 
     ! Compute az and elevation for the current observation.
     ! Simple approach (TODO: implement a more robust computation)
@@ -6324,7 +6325,7 @@ contains
 
     obsop_dump_ready = .true.
     obsop_dump_file = trim(fname)
-    write(obsop_dump_unit,'(A)') '# obs_set obs_idx elm typ stage rank_ens rank_lcl ri rj rk lon lat lev value_kind values...'
+    write(obsop_dump_unit,'(A)') '# obs_set obs_idx elm typ stage rank_ens rank_lcl ri rj rk lon lat lev value_kind values... int_values...'
   end subroutine obsop_interp_dump_initialize
 
   subroutine obsop_interp_dump_finalize()
@@ -6338,10 +6339,11 @@ contains
     obsop_dump_file = ''
   end subroutine obsop_interp_dump_finalize
 
-  subroutine obsop_interp_dump_write(dump_ctx, label, values)
+  subroutine obsop_interp_dump_write(dump_ctx, label, values, int_values)
     type(obsop_interp_dump_context), intent(in), optional :: dump_ctx
     character(len=*), intent(in) :: label
     real(RP), intent(in) :: values(:)
+    integer, intent(in), optional :: int_values(:)
     integer :: i
     character(len=H_MID) :: stage_tag
     character(len=H_MID) :: label_tag
@@ -6358,6 +6360,11 @@ contains
     do i = 1, size(values)
       write(obsop_dump_unit,'(1X,ES20.12E3)', advance='no') values(i)
     end do
+    if (present(int_values)) then
+      do i = 1, size(int_values)
+        write(obsop_dump_unit,'(1X,I12)', advance='no') int_values(i)
+      end do
+    end if
     write(obsop_dump_unit,*)
   end subroutine obsop_interp_dump_write
 
