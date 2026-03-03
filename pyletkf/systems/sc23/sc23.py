@@ -42,13 +42,12 @@ def sc23_proj(lon, lat):
     lon_rad = torch.deg2rad(lon)
     lat_rad = torch.deg2rad(lat)
     x = base_x + RADIUS * FACT * (lon_rad - BASE_LON)
-    
     latrot = .5 * math.pi - lat_rad
     dist = torch.reciprocal(torch.tan(.5 * latrot))
     y = param_y + RADIUS * FACT * torch.log(dist)
     ri = (x - cxg0) / dx 
     rj = (y - cyg0) / dy 
-    return ri-1.5, rj-1.5
+    return ri-2, rj-2
     
 class SC23Tile(Tile):
     """
@@ -56,8 +55,11 @@ class SC23Tile(Tile):
     def read_state(self):
         """
         """
-        states, height, topo, x, y, z, ens = load_scale_state(self.rank)
         pad_x, pad_y = self.pad_x, self.pad_y
+        states, height, topo, x, y, z, ens = load_scale_state(self.rank, 
+                                                              pad_x=pad_x, 
+                                                              pad_y=pad_y)
+        
         
         topo = F.pad(topo, pad_x + pad_y, value=float("nan"))
         height = F.pad(
@@ -90,13 +92,16 @@ class SC23Tile(Tile):
     def read_state_halo(self, x=None, y=None):
         """
         """
-        states, height, topo, x, y, z, ens = load_scale_state(self.rank, x=x, y=y)
+        pad_x, pad_y = self.pad_x, self.pad_y
+        states, height, topo, x, y, z, ens = load_scale_state(self.rank, 
+                                                              pad_x=pad_x, 
+                                                              pad_y=pad_y,
+                                                              x=x, y=y)
 
         ds = xt.Dataset(coords={"x":x,"y":y,"z":z,"ens":ens,"variable":SCALE_STATE_ORDER})
         ds["state"] =(("ens","variable","y","x","z"), states)
         ds["height"]=(("y","x","z"), height)
         ds["topo"]  =(("y","x"), topo)
-
         return ds
         
     def share_halos(self, ds):
@@ -119,9 +124,14 @@ class SC23Tile(Tile):
         """
         return load_radar(filter_lev=filter_lev)
 
-    def share_obs(self, obs, neighbour_obs):
+    def share_obs(self, obs, neighbour_obs, interp):
         """
         """
-        return xt.concat([obs] + [x.to(obs["dat"].device) \
-                                  for x in neighbour_obs],
-                         dim="obs")
+        combined = xt.concat([obs] + [x.to(obs["dat"].device) for x in neighbour_obs], dim="obs")
+        filtered = self.grid.filter_obs_to_tile(
+            combined,
+            self.rank,
+            halo_x=interp.obs_halo_x + 1.5,
+            halo_y=interp.obs_halo_y + .5,
+        )
+        return filtered

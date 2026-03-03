@@ -2,7 +2,11 @@ import torch
 
 def scale_to_letkf(state, rdry, cvap, rvap, cvdry, pre00):
     """
+        state: [ensemble, variable, *other_dimensions]
+            The variable dimension is expected to be organized as: 
+            DENS, RHO, u, v, w, QV, QC, QR, QI, QS, QG
     """
+    state = state.transpose(0,1).contiguous()
     rho, rhot = state[:2]                   # DENS, RHO
     moments = state[2:5] / rho              # u, v, w
     moist = torch.nan_to_num(state[5:], 0)  # QV, QC, QR, QI, QS, QG
@@ -18,11 +22,18 @@ def scale_to_letkf(state, rdry, cvap, rvap, cvdry, pre00):
     pressure = torch.where(valid, pre00 * torch.pow(base, gamma), torch.nan)
     temperature = torch.where(valid, pressure / (rho * rtot), torch.nan)
 
-    return torch.cat([moments, temperature[None], pressure[None], moist])
+    state = torch.cat([moments, temperature[None], pressure[None], moist])
+    state = state.transpose(0,1).contiguous()
+    return state
 
 def letkf_to_scale(state, rdry, cvap, rvap, cvdry, pre00):
     """
+        state: [ensemble, variable, *other_dimensions]
+            The variable dimension is expected to be organized as: 
+            u, v, w, T, P, QV, QC, QR, QI, QS, QG
+
     """
+    state = state.transpose(0,1).contiguous()
     moments = state[:3]                     # u, v, w
     temperature = state[3]                  # T
     pressure = state[4]                     # p
@@ -42,4 +53,7 @@ def letkf_to_scale(state, rdry, cvap, rvap, cvdry, pre00):
     rho = torch.where(valid, pressure / (rtot * temperature), torch.nan)
 
     mom = moments * rho
-    return torch.cat([rho[None], rhot[None], mom, moist])
+    
+    state =  torch.cat([rho[None], rhot[None], mom, moist])
+    state = state.transpose(0,1).contiguous()
+    return state

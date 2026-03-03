@@ -26,8 +26,8 @@ def extract_coordinate_tensors(state_ds: Dataset, obs_ds: Dataset):
     xi, yi = torch.meshgrid(y, x, indexing="ij")
     grid_ri = xi.reshape(-1).repeat_interleave(len(z))
     grid_rj = yi.reshape(-1).repeat_interleave(len(z))
-    grid_z = state_ds["height"].data.permute(1, 2, 0).reshape(-1).to(device=device)
     grid_xy = torch.stack((grid_ri, grid_rj), dim=1).to(device=device)
+    grid_z = state_ds["height"].data.permute(1, 2, 0).reshape(-1).to(device=device)
     
     obs_xy = torch.stack(
         (

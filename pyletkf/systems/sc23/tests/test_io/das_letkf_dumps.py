@@ -12,6 +12,8 @@ from .utils import (
     _read_text_metadata,
 )
 
+DUMP_ROOT = Path("/home/tristan/workspace/scale_letkf/scale-letkf-FugakuNEXT/result/SC23/20210730060030/letkf_dump")
+
 _STAGE_FIELDS: dict[tuple[str, str], Mapping[str, str]] = {
     ("obs_local", "before"): {"search_q0": ">i4"},
     (

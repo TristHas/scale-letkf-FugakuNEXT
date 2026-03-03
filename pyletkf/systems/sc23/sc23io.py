@@ -54,7 +54,9 @@ def load_scale_state(tile_idx=0,
                      prefix="anal_f",
                      members=["0001", "0002"],
                      x=None,
-                     y=None):#, "mean"]):
+                     y=None,
+                     pad_x=(1,1),
+                     pad_y=(1,1)):#, "mean"]):
     """
     """
     tile_name = "pe" + str(tile_idx).zfill(6)
@@ -63,7 +65,7 @@ def load_scale_state(tile_idx=0,
     for member in members:
         fp = DATA_ROOT / f"202107300600{seconds}" / prefix / member \
                        / f"init_20210730-0600{seconds}.000.{tile_name}.nc"
-        ds = load_state(fp, x=x, y=y)
+        ds = load_state(fp, x=x, y=y, pad_x=pad_x, pad_y=pad_y)
         state = np.stack([ds[var].values[:,:,-45:] for var in SCALE_STATE_ORDER])
         states.append(state)
     states = np.stack(states)
@@ -74,7 +76,18 @@ def load_scale_state(tile_idx=0,
     states, height, topo, x, y = map(torch.tensor, [states, height, topo, x, y])
     return states, height, topo, x, y, Z, members
 
-def load_state(fp, x=None, y=None, cache=True):
+def crop_tile(ds, pad_x, pad_y):
+    if pad_x[0]==0:
+        ds = ds.isel(x=slice(1,None), xh=slice(1,None))
+    if pad_x[1]==0:
+        ds = ds.isel(x=slice(None,-1), xh=slice(None,-1))
+    if pad_y[0]==0:
+        ds = ds.isel(y=slice(1,None), yh=slice(1,None))
+    if pad_y[1]==0:
+        ds = ds.isel(y=slice(None,-1), yh=slice(None,-1))
+    return ds
+
+def load_state(fp, pad_x=(1,1), pad_y=(1,1), x=None, y=None, cache=True):
     """
         Load an analysis tile slice. By default, cache the fully expanded Dataset
         for each tile path and serve halo slices from that cached object.
@@ -84,7 +97,7 @@ def load_state(fp, x=None, y=None, cache=True):
         ds = _load_tile_dataset(path)
     else: 
         ds = xr.open_dataset(path)[SCALE_STATE_ORDER + ADDITIONAL_VAR].load()
-
+    ds = crop_tile(ds, pad_x, pad_y)
     indexers = {}
     if x is not None:
         indexers["x"] = [x]
@@ -118,13 +131,15 @@ def load_radar(path=DEFAULT_RADAR_PATH,
     nobs = len(data) // nvar
     _, elm, lon, lat, lev, dat, err, _, _ = data.view(nobs, nvar).t()
     dbz = convert_raw_to_dbz(dat)
+    # Preserve original values for VR; convert only reflectivity
+    dat_converted = torch.where(elm == 4001, dbz, dat)
     
     obs_coord = xt.arange_index(nobs, dtype=int)
     
     attrs = {"radar_lon": radar_lon, "radar_lat": radar_lat, "radar_z": radar_z}
     ds = xt.Dataset(coords={"obs": obs_coord}, attrs=attrs)
     for k,v in zip(["elm", "lon", "lat", "lev", "raw", "err", "dat"],
-                   [elm, lon.double(), lat.double(), lev, dat, err, dbz]):
+                   [elm, lon.double(), lat.double(), lev, dat, err, dat_converted]):
         ds[k]=(("obs",), v)
         
     if filter_lev: ds = filter_obs_height(ds)

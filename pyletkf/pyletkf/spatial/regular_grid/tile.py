@@ -93,7 +93,9 @@ class Tile:
     def strip_halo(self, ds):
         """
         """
-        return ds.isel(x=self.slice_x, y=self.slice_y)
+        stripped = ds.isel(x=self.slice_x, y=self.slice_y)
+        stripped.attrs.update(ds.attrs)
+        return stripped
 
     def populate_obs_coords(self, obs, halo_x=1, halo_y=1):
         """

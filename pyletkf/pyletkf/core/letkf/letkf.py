@@ -13,22 +13,25 @@ Q_SPRD_MAX = 0.5
 class LETKF():
     def __init__(self, 
                  param_infl=1,
-                 eig_val_clamp=10**-12, 
-                 eig_batch_size=50_000,
                  sigma_b=.04,
                  beta=0,
                  alpha_rtpp=0.95,
                  alpha_rtps=0,
+                 eig_val_clamp=10**-12, 
+                 eig_batch_size=50_000,
+                 cov_batch_size=50_000,
             ):
         """
         """
         self.param_infl=param_infl
-        self.eig_val_clamp=eig_val_clamp
-        self.eig_batch_size=eig_batch_size
         self.sigma_b=sigma_b
         self.beta=beta
         self.alpha_rtpp=alpha_rtpp
         self.alpha_rtps=alpha_rtps
+        
+        self.eig_val_clamp=eig_val_clamp
+        self.eig_batch_size=eig_batch_size
+        self.cov_batch_size=cov_batch_size
 
     def infer_update_params(self, ds):
         """
@@ -52,7 +55,7 @@ class LETKF():
         xb = state["state"].data.contiguous()
         state_shape = xb.shape
         xb = xb.view(xb.shape[0], xb.shape[1], -1)   # Flatten spatial dimensions
-        xb = xb.permute(2, 1, 0).contiguous() # variable, cell, ens
+        xb = xb.permute(2, 1, 0).contiguous()        # variable, cell, ens
         
         Wa = da_params["Wa"].values
         wa = da_params["wa"].values

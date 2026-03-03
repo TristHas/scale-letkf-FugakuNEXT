@@ -149,9 +149,9 @@ class Grid():
         rj_global = obs["rj_global"].data
         mask = (
               (ri_global >= ri_min)
-            & (ri_global <= ri_max)
+            & (ri_global <  ri_max - 1)
             & (rj_global >= rj_min)
-            & (rj_global <= rj_max)
+            & (rj_global <  rj_max - 1)
         )
         subset = obs.isel(obs=mask)
         return subset

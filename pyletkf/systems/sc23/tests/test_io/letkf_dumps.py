@@ -210,6 +210,60 @@ def load_obsda_setletkf(rank, ens=["mem0001", "mem0002"]):
             else:
                 ds[variable]=(("obs",), data)
     return ds
+###
+### obsop_interp
+###
+def load_obs_interp_dump():
+    """
+    Load interpolated-state dumps from OBSOP_INTERP_DUMP.
+    Parameters
+    ----------
+    root : str or Path
+        Directory holding obs_interp_rank*.dat.
+    Returns
+    -------
+    list[dict]
+    """
+    root = DUMP_ROOT / "obs_interp_dump"
+    entries = []
+    for path in sorted(root.glob("obs_interp_rank*.dat")):
+        with path.open() as fh:
+            for line in fh:
+                if not line or line[0] == '#':
+                    continue
+                parts = line.split()
+                numeric_tokens = parts[14:]
+                value_tokens: List[str] = []
+                int_tokens: List[str] = []
+                for tok in numeric_tokens:
+                    up = tok.upper()
+                    if ('E' in up) or ('D' in up) or ('.' in tok) or _EXP_FIX.match(tok):
+                        value_tokens.append(tok)
+                    else:
+                        int_tokens.append(tok)
+                values = np.array([_parse_float(tok) for tok in value_tokens], dtype=float)
+                int_values = np.array([int(tok) for tok in int_tokens], dtype=int) if int_tokens else np.empty((0,), dtype=int)
+                entry = {
+                    "obs_set": int(parts[0]),
+                    "obs_idx": int(parts[1]),
+                    "elm": int(parts[2]),
+                    "typ": int(parts[3]),
+                    "stage": parts[4].strip(),
+                    "rank_global": int(parts[5]),
+                    "rank_local": int(parts[6]),
+                    "ri": _parse_float(parts[7]),
+                    "rj": _parse_float(parts[8]),
+                    "rk": _parse_float(parts[9]),
+                    "lon": _parse_float(parts[10]),
+                    "lat": _parse_float(parts[11]),
+                    "lev": _parse_float(parts[12]),
+                    "label": parts[13].strip(),
+                    "values": values,
+                    "int_values": int_values,
+                    "path": path,
+                }
+                entries.append(entry)
+    return entries
 
 
 ###
@@ -407,44 +461,3 @@ def _parse_float(token: str) -> float:
             tok = f"{m.group(1)}E{m.group(2)}"
     return float(tok)
     
-def load_obs_interp_dump():
-    """
-    Load interpolated-state dumps from OBSOP_INTERP_DUMP.
-    Parameters
-    ----------
-    root : str or Path
-        Directory holding obs_interp_rank*.dat.
-    Returns
-    -------
-    list[dict]
-    """
-    root = DUMP_ROOT / "obs_interp_dump"
-    entries = []
-    for path in sorted(root.glob("obs_interp_rank*.dat")):
-        with path.open() as fh:
-            for line in fh:
-                if not line or line[0] == '#':
-                    continue
-                parts = line.split()
-                entry = {
-                    "obs_set": int(parts[0]),
-                    "obs_idx": int(parts[1]),
-                    "elm": int(parts[2]),
-                    "typ": int(parts[3]),
-                    "stage": parts[4].strip(),
-                    "rank_global": int(parts[5]),
-                    "rank_local": int(parts[6]),
-                    "ri": _parse_float(parts[7]),
-                    "rj": _parse_float(parts[8]),
-                    "rk": _parse_float(parts[9]),
-                    "lon": _parse_float(parts[10]),
-                    "lat": _parse_float(parts[11]),
-                    "lev": _parse_float(parts[12]),
-                    "label": parts[13].strip(),
-                    "values": np.array([_parse_float(tok) for tok in parts[14:]], dtype=float),
-                    "path": path,
-                }
-                entries.append(entry)
-    df = pd.DataFrame([[d["obs_idx"]] + d["values"].tolist() for d in dumps])
-    df = df.set_index(0).sort_index()
-    return df

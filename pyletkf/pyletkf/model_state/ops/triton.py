@@ -249,7 +249,7 @@ def _launch_kernel(kernel, state_2d, out_2d, *, rdry, cvap_vals, rvap, cvdry, pr
 
 def scale_to_letkf(state, rdry, cvap, rvap, cvdry, pre00, *, block_size: int = 1024):
     """Convert a SCALE state tensor to LETKF ordering using Triton."""
-
+    state = state.transpose(0,1).contiguous()
     if not isinstance(state, torch.Tensor):
         raise TypeError("state must be a torch.Tensor")
     device = state.device
@@ -273,12 +273,15 @@ def scale_to_letkf(state, rdry, cvap, rvap, cvdry, pre00, *, block_size: int = 1
         )
 
         result = out_2d.reshape((LETKF_VAR_COUNT, *trailing_shape))
+        result = result.transpose(0, 1).contiguous()
 
     return result
 
 def letkf_to_scale(state, rdry, cvap, rvap, cvdry, pre00, *, block_size: int = 1024):
-    """Convert a LETKF state tensor back to SCALE ordering using Triton."""
-
+    """
+        Convert a LETKF state tensor back to SCALE ordering using Triton.
+    """
+    state = state.transpose(0,1).contiguous()
     if not isinstance(state, torch.Tensor):
         raise TypeError("state must be a torch.Tensor")
     device = state.device
@@ -302,6 +305,7 @@ def letkf_to_scale(state, rdry, cvap, rvap, cvdry, pre00, *, block_size: int = 1
         )
 
         result = out_2d.reshape((SCALE_VAR_COUNT, *trailing_shape))
+        result = result.transpose(0, 1).contiguous()
 
     return result
 

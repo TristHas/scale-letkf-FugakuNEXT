@@ -1,3 +1,4 @@
+import math
 import torch
 
 HORI_LOCAL_RADAR_OBSNOREF = 2000.0
@@ -12,7 +13,7 @@ def chunked_topk_neighbors(grid_xy, grid_z, obs_xy, obs_z,
                            horiz_loc=HORI_LOCAL_RADAR_OBSNOREF,
                            vert_loc=VERT_LOCAL_RADAR_OBSNOREF,
                            zero_fac=DIST_ZERO_FAC,
-                           chunk_size = NN_CHUNK_SIZE,
+                           chunk_size=NN_CHUNK_SIZE,
                            **kwargs):
     """
     """
@@ -62,7 +63,7 @@ def topk_quad(grid_xy, grid_z, obs_xy, obs_z,
     """
     device = obs_xy.device
     dtype = obs_xy.dtype
-    n_cells = zero_fac
+    n_cells = math.ceil(zero_fac)
     nobs = obs_xy.shape[0]
     ngrid = grid_xy.shape[0]
 
